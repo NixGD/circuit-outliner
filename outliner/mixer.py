@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
@@ -5,24 +6,29 @@ import torch
 from utils import DEVICE
 
 
+@dataclass(frozen=True)
+class MixerHparams:
+    init_p: float = 0.9
+    init_q: float = 0.1
+    adversarial: bool = False
+
+
 class Mixer:
     def __init__(
         self,
         weight_shape: Tuple[int],
-        init_p: float = 0.9,
-        init_q: float = 0.1,
-        adversarial: bool = False,
-        type: Optional[str] = None, # for neater sorting, etc
+        hparams: MixerHparams = MixerHparams(),
+        type: Optional[str] = None,  # non-functional, but a helpful tag
     ):
         """
         weight_shape should allow broadcasting with activations. eg:
         activations: [batch, seqpos, heads, embsize]
         weights: [heads, 1]
         """
-        self.adversarial = adversarial
-        self.p = torch.full(weight_shape, fill_value=init_p, device=DEVICE)
-        if adversarial:
-            self.q = torch.full(weight_shape, fill_value=init_q, device=DEVICE)
+        self.adversarial = hparams.adversarial
+        self.p = torch.full(weight_shape, fill_value=hparams.init_p, device=DEVICE)
+        if self.adversarial:
+            self.q = torch.full(weight_shape, fill_value=hparams.init_q, device=DEVICE)
 
     def get_mix_weights(self):
         if self.adversarial:
