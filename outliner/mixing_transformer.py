@@ -1,3 +1,4 @@
+import itertools
 from dataclasses import dataclass
 
 import torch
@@ -50,3 +51,6 @@ class MixingTransformer(nn.Module):
         is_mixed = lambda name: name in self.mixers
         out = self.base_model.run_with_hooks(ins, fwd_hooks=[(is_mixed, hook)], **kwargs)
         return out[ref_idxs]
+
+    def mixer_parameters(self):
+        return itertools.chain.from_iterable(m.parameters() for m in self.mixers.values())

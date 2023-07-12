@@ -1,50 +1,127 @@
 # %%
-from itertools import islice
+import itertools
+from dataclasses import dataclass
 from typing import Any, Dict
 
 import torch
+from torch import nn
+from tqdm import trange
 
+import wandb
 from mixer import MixerHparams
 from mixing_transformer import MixingTransformer, MixingTransformerHparams
-from utils import DEVICE, get_owt_dataset, base_model, tokenizer
+from utils import DEVICE, base_model, get_owt_dataset, tokenizer
 
 # %%
 # mix_model = MixingTransformer(base_model)
 
 dataset = get_owt_dataset()
 
-# %%
 
+# %% [markdown]
 
-def get_loss(model, max_steps=10, batch_size=4):
-    losses = []
-    batch_iter = dataset.iter(batch_size)
-    for step in range(max_steps):
-        ref_toks = torch.stack(next(batch_iter)["toks"])
-        alt_toks = torch.stack(next(batch_iter)["toks"])
-        out = model.forward(ref_toks, alt_toks)
+"""
+Let's evaluate the loss of the mixed model for different values of p.
+At p=0 we are just running the model on the alt-input, but evaluating it's output against the next token from the ref-input. This results in a high loss, as the model is confidently wrong.
 
-        loss = torch.nn.CrossEntropyLoss(reduction="mean")(out[:, :-1].flatten(0, 1), ref_toks[:, 1:].flatten())
-        losses.append(loss.item())
+As p increases the loss should decrease, as more information from the reference prompt passes through.
 
-    return sum(losses) / len(losses)
-
+At p=1 we are just running the model on the reference input, so the loss should be the same as the base model (about 3 for GPT2-sm on open web text).
+"""
 
 # %%
 
-print("losses for different p")
-for p in torch.arange(0, 1.01, 0.1):
+
+def get_loss(model, batch_iter) -> torch.Tensor:
+    ref_toks = torch.stack(next(batch_iter)["toks"])
+    alt_toks = torch.stack(next(batch_iter)["toks"])
+    out = model.forward(ref_toks, alt_toks)
+
+    loss = torch.nn.CrossEntropyLoss(reduction="mean")(out[:, :-1].flatten(0, 1), ref_toks[:, 1:].flatten())
+    return loss
+
+
+def eval_p(p: float) -> None:
     hparams = MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=p))
     model = MixingTransformer(base_model, hparams=hparams)
+
+    batch_iter = dataset.iter(batch_size=4)
+    losses = []
     with torch.no_grad():
-        loss = get_loss(model)
+        losses = [get_loss(model, batch_iter).item() for _ in range(2)]
 
-    print(f"p={p:.2f} | loss={loss:.2f}")
+    avg_loss = sum(losses) / len(losses)
+    print(f"p={p:.2f} | loss={avg_loss:.2f}")
 
 
+[eval_p(p) for p in torch.arange(0, 1.01, 0.1)]
+
+# %% [markdown]
+
+"""
+Some performance notes:
+```
+> %timeit torch.stack(next(batch_iter)["toks"])
+50.9 ms
+
+For batch_size=4:
+> %timeit base_model.forward(toks, return_type="loss")
+120 ms
+> %timeit mixed_model.forward(ref_toks, alt_toks)
+231 ms
+```
+"""
 # %%
 
 
+@dataclass
+class TrainHparams:
+    transformer_hparams: MixingTransformerHparams = MixingTransformerHparams()
+    batch_size: int = 4
+    steps: int = 500
+    lr: float = 1e-4
+    lr_gamma: float = 0.99
+
+
+def log_wandb(step, model, **kwargs):
+    kwargs |= {f"{n}/avg_p": m.p.mean().item() for n, m in model.mixers.items()}
+    wandb.log(kwargs)
+
+
+def train_loop(hparams: TrainHparams()):
+    run = wandb.init(project="outliner", config=hparams)
+
+    model = MixingTransformer(base_model, hparams=hparams.transformer_hparams)
+    opt = torch.optim.Adam(model.mixer_parameters(), lr=hparams.lr)
+    schedule = torch.optim.lr_scheduler.ExponentialLR(opt, hparams.lr_gamma)
+    batch_iter = dataset.iter(hparams.batch_size)
+    for step in trange(hparams.steps):
+        loss = get_loss(model, batch_iter)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        schedule.step()
+
+        log_wandb(step, model, loss=loss.item(), lr=schedule.get_last_lr())
+
+    run.finish()
+    return model
+
+
+# %% [markdown]
+"""
+A basic sanity check: if we have no regularization penalty or weight decay, we should see p increase to ~1.
+"""
+
+hparams = TrainHparams(
+    transformer_hparams=MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=0.5)), steps=200, lr=0.03
+)
+
+
+train_loop(hparams)
+
+
+# %%
 ##### Misc testing
 
 
