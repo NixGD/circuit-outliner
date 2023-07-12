@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
+from torch import nn
 
 from utils import DEVICE
 
@@ -13,32 +14,44 @@ class MixerHparams:
     adversarial: bool = False
 
 
-class Mixer:
+class Mixer(nn.Module):
     def __init__(
         self,
-        weight_shape: Tuple[int],
+        shape: Tuple[int],
         hparams: MixerHparams = MixerHparams(),
         type: Optional[str] = None,  # non-functional, but a helpful tag
     ):
         """
-        weight_shape should allow broadcasting with activations. eg:
-        activations: [batch, seqpos, heads, embsize]
-        weights: [heads, 1]
+        shape should allow broadcasting with activations. eg:
+            activations: [batch, seqpos, heads, embsize]
+            weights: [heads, 1]
         """
+        super().__init__()
         self.adversarial = hparams.adversarial
-        self.p = torch.full(weight_shape, fill_value=hparams.init_p, device=DEVICE)
+        self.p_logit = self.init_param(hparams.init_p, shape)
         if self.adversarial:
-            self.q = torch.full(weight_shape, fill_value=hparams.init_q, device=DEVICE)
+            self.q_logit = self.init_param(hparams.init_q, shape)
 
-    def get_mix_weights(self):
-        if self.adversarial:
-            raise self.p + self.q - self.p * self.q
-        else:
-            return self.p
+    @staticmethod
+    def init_param(p: float, shape: Tuple[int]):
+        assert p >= 0 and p <= 1
+        logit = torch.special.logit(torch.as_tensor(p), eps=1e-6)
+        return nn.Parameter(torch.full(fill_value=logit, size=shape, device=DEVICE))
 
-    def __call__(self, x, y):
+    @property
+    def p(self):
+        return torch.sigmoid(self.p_logit)
+
+    @property
+    def q(self):
+        return torch.sigmoid(self.q_logit)
+
+    @property
+    def w(self) -> torch.Tensor:
         """
-        broadcasts, so
+        This is the total mix proportion, including both protagonist and adversarial contributions. Will be a tensor with values in [0,1].
         """
-        w = self.get_mix_weights()
-        return x * w + y * (1 - w)
+        return self.p + self.q - self.p * self.q if self.adversarial else self.p
+
+    def forward(self, x, y):
+        return x * self.w + y * (1 - self.w)
