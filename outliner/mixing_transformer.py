@@ -85,12 +85,12 @@ class IndirectMixingTransformer(MixingTransformer):
         """for logging and regularization calculations"""
 
         def stack_params(type: str) -> Optional[torch.Tensor]:
-            ms = [m for m in self.mixers.values() if m.type == type]
+            ms = [m for m in self.mixers.values() if m.loc_type == type]
             if len(ms) == 0:
                 return None
-            ps = torch.stack([m.p for m in ms], dim=0)
+            ps = torch.stack([m.p for m in ms], dim=0).squeeze()
             if self.hparams.mixer_hparams.adversarial:
-                qs = torch.stack([m.q for m in ms], dim=0)
+                qs = torch.stack([m.q for m in ms], dim=0).squeeze()
                 return torch.stack([ps, qs], dim=0)
             else:
                 return ps.unsqueeze(0)
@@ -148,9 +148,9 @@ class DirectOutMixingTransformer(MixingTransformer):
         self,
     ) -> ParameterSnapshot:
         heads = (
-            torch.stack([self.mixer.p, self.mixer.q], 0)
+            torch.stack([self.mixer.p, self.mixer.q], 0).squeeze()
             if self.hparams.mixer_hparams.adversarial
-            else self.mixer.p.unsqueeze(0)
+            else self.mixer.p.squeeze().unsqueeze(0)
         )
         return ParameterSnapshot(
             heads=heads,

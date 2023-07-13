@@ -1,17 +1,16 @@
 # %%
 import dataclasses
-import itertools
-from dataclasses import dataclass
-from typing import Any, Dict
 
+import matplotlib.pyplot as plt
 import torch
-from torch import nn
 from tqdm import trange
 
 import wandb
 from mixer import MixerHparams
-from mixing_transformer import DirectOutMixingTransformer, MixingTransformer, MixingTransformerHparams
-from utils import DEVICE, base_model, get_owt_dataset, tokenizer
+from mixing_transformer import (DirectOutMixingTransformer,
+                                IndirectMixingTransformer,
+                                MixingTransformerHparams)
+from utils import base_model, get_owt_dataset
 
 # %%
 # mix_model = MixingTransformer(base_model)
@@ -47,15 +46,12 @@ def eval_p(p: float | torch.Tensor) -> None:
     model = DirectOutMixingTransformer(base_model, hparams=hparams)
 
     batch_iter = dataset.iter(batch_size=4)
-    losses = []
     with torch.no_grad():
-        losses = [get_loss(model, batch_iter).item() for _ in range(2)]
-
-    avg_loss = sum(losses) / len(losses)
-    print(f"p={p:.2f} | loss={avg_loss:.2f}")
+        loss = get_loss(model, batch_iter).item()
+    print(f"p={p:.2f} | loss={loss:.2f}")
 
 
-[eval_p(p) for p in torch.arange(0, 1.01, 0.1)]
+[eval_p(p) for p in torch.arange(0, 1.01, 0.2)]
 
 # %% [markdown]
 
@@ -75,7 +71,7 @@ For batch_size=4:
 # %%
 
 
-@dataclass
+@dataclasses.dataclass
 class TrainHparams:
     transformer_hparams: MixingTransformerHparams = MixingTransformerHparams()
     batch_size: int = 4
@@ -83,6 +79,11 @@ class TrainHparams:
     lr: float = 1e-4
     lr_gamma: float = 0.99
     direct_out: bool = False
+    reg_coeff: float = 1
+    wandb_enable: bool = True
+
+
+test_hypers = TrainHparams(steps=10, wandb_enable=False)
 
 
 def log_wandb(step, snapshot, **kwargs):
@@ -92,62 +93,86 @@ def log_wandb(step, snapshot, **kwargs):
 
 
 def train_loop(hparams: TrainHparams):
-    run: Run = wandb.init(project="outliner", config=dataclasses.asdict(hparams))  # type: ignore
+    if hparams.wandb_enable:
+        run: Run = wandb.init(project="outliner", config=dataclasses.asdict(hparams))  # type: ignore
 
     if hparams.direct_out:
         model = DirectOutMixingTransformer(base_model, hparams=hparams.transformer_hparams)
     else:
-        model = MixingTransformer(base_model, hparams=hparams.transformer_hparams)
+        model = IndirectMixingTransformer(base_model, hparams=hparams.transformer_hparams)
     opt = torch.optim.Adam(model.mixer_parameters(), lr=hparams.lr)
     schedule = torch.optim.lr_scheduler.ExponentialLR(opt, hparams.lr_gamma)
     batch_iter = dataset.iter(hparams.batch_size)
 
     for step in trange(hparams.steps):
-        loss = get_loss(model, batch_iter)
+        model_loss = get_loss(model, batch_iter)
+        snapshot = model.parameter_snapshot()
+        reg_loss = snapshot.heads.mean() * hparams.reg_coeff
+
         opt.zero_grad()
+        loss = model_loss + reg_loss
         loss.backward()
         opt.step()
         schedule.step()
 
-        log_wandb(step, model.parameter_snapshot(), loss=loss.item(), lr=schedule.get_last_lr())
+        log_wandb(
+            step,
+            model.parameter_snapshot(),
+            loss=loss.item(),
+            model_loss=model_loss.item(),
+            reg_loss=reg_loss.item(),
+            lr=schedule.get_last_lr()[0],
+        )
 
-    run.finish()
+    if hypers.wandb_enable:
+        run.finish()
     return model
 
 
 # %% [markdown]
-"""
-A basic sanity check: if we have no regularization penalty or weight decay, we should see p increase to ~1.
-"""
 
-hparams = TrainHparams(
+
+base_hypers = TrainHparams(
     transformer_hparams=MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=0.5)),
-    steps=200,
-    lr=0.03,
-    direct_out=True,
+    steps=80,
+    lr=0.1,
+    lr_gamma=0.995,
 )
 
+final_params = {}
 
-train_loop(hparams)
+fig, axs = plt.subplots(2, 3, figsize=(10, 7), sharex=True, sharey=True)
+
+for i, is_direct in enumerate([True, False]):
+    for j, reg_coeff in enumerate([0.1, 1, 10]):
+        hypers = dataclasses.replace(base_hypers, direct_out=is_direct, reg_coeff=reg_coeff)
+        trained_model = train_loop(hypers)
+
+        snap = trained_model.parameter_snapshot()
+        final_params[(is_direct, reg_coeff)] = snap
 
 
 # %%
-##### Misc testing
+
+fig, axs = plt.subplots(2, 3, figsize=(8, 6), sharex=True, sharey=True)
+for i, is_direct in enumerate([True, False]):
+    for j, reg_coeff in enumerate([0.1, 1, 10]):
+        snap = final_params[(is_direct, reg_coeff)]
+        head_final_vals = snap.heads[0, :, :].detach().cpu().numpy()
+        axs[i, j].matshow(head_final_vals, cmap="Reds", vmin=0, vmax=1)
+
+        if i == 1:
+            axs[i, j].set_xlabel("head")
+            # axs[i, j].set_xticks(range(12))
+            axs[i, j].xaxis.set_ticks_position("bottom")
+        if j == 0:
+            axs[i, j].set_ylabel("layer")
+            # axs[i, j].set_yticks(range(12))
 
 
-# batch = ["The quick brown fox jumped over the lazy dog", "The dog didn't care much. It was used to it."]
-# toks = base_model.to_tokens(batch)
+fig.suptitle("Importance of heads for direct paths (top) and all paths (bottom)")
 
-# out = mix_model.forward(toks[[0]], toks[[1]])
+plt.tight_layout()
+plt.savefig("mixing_heads.png")
 
 # %%
-
-# print("Mixed (ref) top predicitons:")
-# for i in range(10):
-#     top_tok_id = out[0, i].argmax(-1)
-#     print(
-#         base_model.to_str_tokens(batch[0])[i],
-#         repr(base_model.to_string(top_tok_id.item())),
-#         out[0, i, top_tok_id].item(),
-#         sep="\t| ",
-#     )
