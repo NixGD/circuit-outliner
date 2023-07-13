@@ -18,3 +18,13 @@ def get_owt_dataset(min_len=1024):
     dataset = dataset.map(add_tok_columns, batched=True, batch_size=10)
     dataset = dataset.filter(lambda x: x["seqlen"] >= min_len)
     return dataset
+
+
+class GradReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return (-grad_output)

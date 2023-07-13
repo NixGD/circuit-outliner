@@ -9,7 +9,7 @@ from tqdm import trange
 
 import wandb
 from mixer import MixerHparams
-from mixing_transformer import MixingTransformer, MixingTransformerHparams
+from mixing_transformer import DirectOutMixingTransformer, MixingTransformer, MixingTransformerHparams, ParameterLog
 from utils import DEVICE, base_model, get_owt_dataset, tokenizer
 
 # %%
@@ -43,7 +43,7 @@ def get_loss(model, batch_iter) -> torch.Tensor:
 
 def eval_p(p: float) -> None:
     hparams = MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=p))
-    model = MixingTransformer(base_model, hparams=hparams)
+    model = DirectOutMixingTransformer(base_model, hparams=hparams)
 
     batch_iter = dataset.iter(batch_size=4)
     losses = []
@@ -81,20 +81,28 @@ class TrainHparams:
     steps: int = 500
     lr: float = 1e-4
     lr_gamma: float = 0.99
+    direct_out: bool = False
 
 
-def log_wandb(step, model, **kwargs):
-    kwargs |= {f"{n}/avg_p": m.p.mean().item() for n, m in model.mixers.items()}
-    wandb.log(kwargs)
+def log_wandb(step, log, **kwargs):
+    to_log = kwargs
+    to_log["heads/p/mean"] = log.head_params[-1, 0].mean().item()
+    wandb.log(to_log)
 
 
 def train_loop(hparams: TrainHparams()):
     run = wandb.init(project="outliner", config=hparams)
 
-    model = MixingTransformer(base_model, hparams=hparams.transformer_hparams)
+    if hparams.direct_out:
+        model = DirectOutMixingTransformer(base_model, hparams=hparams.transformer_hparams)
+    else:
+        model = MixingTransformer(base_model, hparams=hparams.transformer_hparams)
     opt = torch.optim.Adam(model.mixer_parameters(), lr=hparams.lr)
     schedule = torch.optim.lr_scheduler.ExponentialLR(opt, hparams.lr_gamma)
     batch_iter = dataset.iter(hparams.batch_size)
+
+    log = ParameterLog()
+
     for step in trange(hparams.steps):
         loss = get_loss(model, batch_iter)
         opt.zero_grad()
@@ -102,7 +110,8 @@ def train_loop(hparams: TrainHparams()):
         opt.step()
         schedule.step()
 
-        log_wandb(step, model, loss=loss.item(), lr=schedule.get_last_lr())
+        model.log_parameters(log)
+        log_wandb(step, log, loss=loss.item(), lr=schedule.get_last_lr())
 
     run.finish()
     return model
@@ -114,7 +123,10 @@ A basic sanity check: if we have no regularization penalty or weight decay, we s
 """
 
 hparams = TrainHparams(
-    transformer_hparams=MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=0.5)), steps=200, lr=0.03
+    transformer_hparams=MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=0.5)),
+    steps=200,
+    lr=0.03,
+    direct_out=True,
 )
 
 

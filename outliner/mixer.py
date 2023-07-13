@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from utils import DEVICE
+from utils import DEVICE, ReverseGrad
 
 
 @dataclass(frozen=True)
@@ -51,7 +51,13 @@ class Mixer(nn.Module):
         """
         This is the total mix proportion, including both protagonist and adversarial contributions. Will be a tensor with values in [0,1].
         """
-        return self.p + self.q - self.p * self.q if self.adversarial else self.p
+        if self.adversarial:
+            # we reverse the gradient on backwards pass so that the adversarial weights maximize loss
+            q = ReverseGrad.apply(self.q)
+            return self.p + q - self.p * q
+        else:
+            return self.p
 
     def forward(self, x, y):
+        # print("x", x.shape, "w", self.w.shape)
         return x * self.w + y * (1 - self.w)
