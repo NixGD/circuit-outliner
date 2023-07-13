@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 import torch
 from torch import nn
@@ -13,13 +13,15 @@ class MixerHparams:
     init_q: float = 0.1
     adversarial: bool = False
 
+LocType = Literal["head", "neuron", "mlp"]
+
 
 class Mixer(nn.Module):
     def __init__(
         self,
-        shape: Tuple[int],
+        shape: Tuple[int, ...],
+        loc_type: LocType,
         hparams: MixerHparams = MixerHparams(),
-        type: Optional[str] = None,  # non-functional, but a helpful tag
     ):
         """
         shape should allow broadcasting with activations. eg:
@@ -27,6 +29,7 @@ class Mixer(nn.Module):
             weights: [heads, 1]
         """
         super().__init__()
+        self.loc_type = loc_type
         self.adversarial = hparams.adversarial
         self.p_logit = self.init_param(hparams.init_p, shape)
         if self.adversarial:

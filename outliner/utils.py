@@ -7,7 +7,7 @@ base_model = HookedTransformer.from_pretrained("gpt2-small", device=DEVICE)
 tokenizer = base_model.tokenizer
 
 def get_owt_dataset(min_len=1024):
-    dataset = datasets.load_dataset(path="openwebtext", streaming=True)["train"]
+    dataset : IterableDataset = datasets.load_dataset(path="openwebtext", streaming=True)["train"] # type: ignore
     dataset = dataset.shuffle(buffer_size=10_000, seed=0)
 
     def add_tok_columns(dataset_batch):
@@ -20,7 +20,7 @@ def get_owt_dataset(min_len=1024):
     return dataset
 
 
-class GradReverse(torch.autograd.Function):
+class ReverseGrad(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
         return x

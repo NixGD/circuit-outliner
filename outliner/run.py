@@ -1,4 +1,5 @@
 # %%
+import dataclasses
 import itertools
 from dataclasses import dataclass
 from typing import Any, Dict
@@ -9,7 +10,7 @@ from tqdm import trange
 
 import wandb
 from mixer import MixerHparams
-from mixing_transformer import DirectOutMixingTransformer, MixingTransformer, MixingTransformerHparams, ParameterLog
+from mixing_transformer import DirectOutMixingTransformer, MixingTransformer, MixingTransformerHparams
 from utils import DEVICE, base_model, get_owt_dataset, tokenizer
 
 # %%
@@ -41,7 +42,7 @@ def get_loss(model, batch_iter) -> torch.Tensor:
     return loss
 
 
-def eval_p(p: float) -> None:
+def eval_p(p: float | torch.Tensor) -> None:
     hparams = MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=p))
     model = DirectOutMixingTransformer(base_model, hparams=hparams)
 
@@ -84,14 +85,14 @@ class TrainHparams:
     direct_out: bool = False
 
 
-def log_wandb(step, log, **kwargs):
+def log_wandb(step, snapshot, **kwargs):
     to_log = kwargs
-    to_log["heads/p/mean"] = log.head_params[-1, 0].mean().item()
+    to_log["heads/p/mean"] = snapshot.heads[0].mean().item()
     wandb.log(to_log)
 
 
-def train_loop(hparams: TrainHparams()):
-    run = wandb.init(project="outliner", config=hparams)
+def train_loop(hparams: TrainHparams):
+    run: Run = wandb.init(project="outliner", config=dataclasses.asdict(hparams))  # type: ignore
 
     if hparams.direct_out:
         model = DirectOutMixingTransformer(base_model, hparams=hparams.transformer_hparams)
@@ -101,8 +102,6 @@ def train_loop(hparams: TrainHparams()):
     schedule = torch.optim.lr_scheduler.ExponentialLR(opt, hparams.lr_gamma)
     batch_iter = dataset.iter(hparams.batch_size)
 
-    log = ParameterLog()
-
     for step in trange(hparams.steps):
         loss = get_loss(model, batch_iter)
         opt.zero_grad()
@@ -110,8 +109,7 @@ def train_loop(hparams: TrainHparams()):
         opt.step()
         schedule.step()
 
-        model.log_parameters(log)
-        log_wandb(step, log, loss=loss.item(), lr=schedule.get_last_lr())
+        log_wandb(step, model.parameter_snapshot(), loss=loss.item(), lr=schedule.get_last_lr())
 
     run.finish()
     return model
