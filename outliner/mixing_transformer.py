@@ -5,7 +5,7 @@ from typing import Iterable, Optional, Tuple
 import einops
 import torch
 from torch import nn
-from transformer_lens import HookedTransformer, HookedTransformerConfig
+from transformer_lens import ActivationCache, HookedTransformer, HookedTransformerConfig
 from transformer_lens.hook_points import HookPoint
 
 from mixer import LocType, Mixer, MixerHparams
@@ -113,47 +113,68 @@ class DirectOutMixingTransformer(MixingTransformer):
         self.cfg = self.base_model.cfg
         self.hparams = hparams
         # TODO: generalize
-        if not self.hparams.mix_heads or self.hparams.mix_mlps or self.hparams.mix_neurons:
+        self.mixers = {}
+        if self.hparams.mix_heads:
+            self.mixers["head"] = Mixer(
+                (self.cfg.n_layers, self.cfg.n_heads, 1), "head", hparams=self.hparams.mixer_hparams
+            )
+        if self.hparams.mix_neurons:
+            assert not self.hparams.mix_mlps
             raise NotImplementedError
+        if self.hparams.mix_mlps:
+            assert not self.hparams.mix_neurons
+            self.mixers["mlp"] = Mixer((self.cfg.n_layers, 1), "mlp", hparams=self.hparams.mixer_hparams)
 
-        self.mixer = Mixer((self.cfg.n_layers, self.cfg.n_heads, 1, 1), "head", hparams=self.hparams.mixer_hparams)
+    def _residual_diff_for_heads(self, cache: ActivationCache, ref_idxs: torch.Tensor):
+        cache.compute_head_results()
+        head_results = cache.stack_head_results()
+        head_results = einops.rearrange(
+            head_results,
+            "(layer head) batch seqlen emb -> batch seqlen layer head emb",
+            layer=self.cfg.n_layers,
+            head=self.cfg.n_heads,
+        )
+
+        # we mix head outputs from the ref batch with head outputs from the alt batch
+        mixed_head_results = self.mixers["head"](head_results[ref_idxs], head_results[~ref_idxs])
+        return mixed_head_results.sum((2, 3)) - head_results[ref_idxs].sum((2, 3))
+
+    def _residual_diff_for_mlps(self, cache: ActivationCache, ref_idxs: torch.Tensor):
+        # [batch, seqlen, layer, emb]
+        mlp_results = torch.stack([cache[f"blocks.{l}.hook_mlp_out"] for l in range(self.cfg.n_layers)], dim=2)
+        mixed_mlp_results = self.mixers["mlp"](mlp_results[ref_idxs], mlp_results[~ref_idxs])
+        return mixed_mlp_results.sum(2) - mlp_results[ref_idxs].sum(2)
 
     def forward(self, ref_in, alt_in, **kwargs):
         ins = torch.cat([ref_in, alt_in], dim=0)
         ref_idxs = torch.arange(len(ins)) < len(ref_in)
 
         _, cache = self.base_model.run_with_cache(ins, **kwargs)
-        cache.compute_head_results()
-        head_results = cache.stack_head_results()
-        head_results = einops.rearrange(
-            head_results,
-            "(layer head) batch seqlen emb -> batch layer head seqlen emb",
-            layer=self.cfg.n_layers,
-            head=self.cfg.n_heads,
-        )
-
-        # we mix head outputs from the ref batch with head outputs from the alt batch
-        mixed_head_results = self.mixer(head_results[ref_idxs], head_results[~ref_idxs])
         pre_final_ln = cache[f"blocks.{self.cfg.n_layers-1}.hook_resid_post"][ref_idxs]  # [ref_batch, seqlen, emb]
-
-        # new_residual = ref_residual - ref_residual_from_heads + mixed_residual_from_heads
-        new_pre_final_ln = pre_final_ln - head_results[ref_idxs].sum((1, 2)) + mixed_head_results.sum((1, 2))
-        out = self.base_model.unembed(self.base_model.ln_final(new_pre_final_ln))
+        if self.hparams.mix_heads:
+            pre_final_ln += self._residual_diff_for_heads(cache, ref_idxs)
+        if self.hparams.mix_mlps:
+            pre_final_ln += self._residual_diff_for_mlps(cache, ref_idxs)
+        out = self.base_model.unembed(self.base_model.ln_final(pre_final_ln))
         return out
 
     def mixer_parameters(self):
-        return self.mixer.parameters()
+        return itertools.chain.from_iterable(m.parameters() for m in self.mixers.values())
 
     def parameter_snapshot(
         self,
     ) -> ParameterSnapshot:
-        heads = (
-            torch.stack([self.mixer.p, self.mixer.q], 0).squeeze()
-            if self.hparams.mixer_hparams.adversarial
-            else self.mixer.p.squeeze().unsqueeze(0)
-        )
+        def stack_params(type: str) -> Optional[torch.Tensor]:
+            m: Optional[Mixer] = self.mixers.get(type)
+            if m is None:
+                return None
+            if m.adversarial:
+                return torch.stack([m.p.squeeze(), m.q.squeeze()], dim=0)
+            else:
+                return m.p.squeeze().unsqueeze(0)
+
         return ParameterSnapshot(
-            heads=heads,
-            neurons=None,
-            mlps=None,
+            heads=stack_params("head"),
+            neurons=stack_params("neuron"),
+            mlps=stack_params("mlp"),
         )

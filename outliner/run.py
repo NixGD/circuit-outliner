@@ -42,7 +42,7 @@ def get_loss(model, batch_iter) -> torch.Tensor:
 
 
 def eval_p(p: float | torch.Tensor) -> None:
-    hparams = MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=p))
+    hparams = MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=p), mix_mlps=True)
     model = DirectOutMixingTransformer(base_model, hparams=hparams)
 
     batch_iter = dataset.iter(batch_size=4)
@@ -89,6 +89,7 @@ test_hypers = TrainHparams(steps=10, wandb_enable=False)
 def log_wandb(step, snapshot, **kwargs):
     to_log = kwargs
     to_log["heads/p/mean"] = snapshot.heads[0].mean().item()
+    to_log["heads/q/mean"] = snapshot.heads[1].mean().item() if snapshot.heads.shape[0] > 1 else None
     wandb.log(to_log)
 
 
@@ -106,23 +107,31 @@ def train_loop(hparams: TrainHparams):
 
     for step in trange(hparams.steps):
         model_loss = get_loss(model, batch_iter)
-        snapshot = model.parameter_snapshot()
-        reg_loss = snapshot.heads.mean() * hparams.reg_coeff
+        snap = model.parameter_snapshot()
 
-        opt.zero_grad()
+        # the len(w) factor means that the total regularization penalty is twice as large if there's an adversary
+        # this keeps protaganist behavior comparable with and without an adversary
+        get_reg_loss = lambda w: w.mean() * reg_coeff * len(w) if w is not None else torch.tensor(0)
+        head_reg_loss, mlp_reg_loss, neuron_reg_loss = [get_reg_loss(w) for w in (snap.heads, snap.mlps, snap.neurons)]
+        reg_loss = head_reg_loss + mlp_reg_loss + neuron_reg_loss
         loss = model_loss + reg_loss
-        loss.backward()
-        opt.step()
-        schedule.step()
 
         log_wandb(
             step,
-            model.parameter_snapshot(),
+            snap,
             loss=loss.item(),
             model_loss=model_loss.item(),
             reg_loss=reg_loss.item(),
+            head_reg_loss=head_reg_loss.item(),
+            mlp_reg_loss=mlp_reg_loss.item(),
+            neuron_reg_loss=neuron_reg_loss.item(),
             lr=schedule.get_last_lr()[0],
         )
+
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        schedule.step()
 
     if hypers.wandb_enable:
         run.finish()
@@ -133,10 +142,13 @@ def train_loop(hparams: TrainHparams):
 
 
 base_hypers = TrainHparams(
-    transformer_hparams=MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=0.5)),
-    steps=80,
+    transformer_hparams=MixingTransformerHparams(
+        mixer_hparams=MixerHparams(init_p=0.5, adversarial=True), mix_mlps=True
+    ),
+    steps=150,
     lr=0.1,
     lr_gamma=0.995,
+    reg_coeff=10,
 )
 
 final_params = {}
@@ -159,11 +171,13 @@ for i, is_direct in enumerate([True, False]):
     for j, reg_coeff in enumerate([0.1, 1, 10]):
         snap = final_params[(is_direct, reg_coeff)]
         head_final_vals = snap.heads[0, :, :].detach().cpu().numpy()
+        mlp_final_vals = snap.mlps[0, :, None].detach().cpu().numpy()
+        w = torch.cat([head_final_vals, mlp_final_vals], dim=1)
         axs[i, j].matshow(head_final_vals, cmap="Reds", vmin=0, vmax=1)
 
         if i == 1:
             axs[i, j].set_xlabel("head")
-            # axs[i, j].set_xticks(range(12))
+            axs[i, j].set_xticks(list(range(12)) + ["mlp"])
             axs[i, j].xaxis.set_ticks_position("bottom")
         if j == 0:
             axs[i, j].set_ylabel("layer")
@@ -176,3 +190,53 @@ plt.tight_layout()
 plt.savefig("mixing_heads.png")
 
 # %%
+
+
+adv_base_hypers = TrainHparams(
+    transformer_hparams=MixingTransformerHparams(
+        mixer_hparams=MixerHparams(init_p=0.5, adversarial=True), mix_mlps=True
+    ),
+    steps=150,
+    lr=0.1,
+    lr_gamma=0.995,
+    reg_coeff=10,
+    direct_out=True,
+)
+noadv_model = train_loop(adv_base_hypers)
+
+# %%
+snap = noadv_model.parameter_snapshot()
+p = snap.heads[0, :, :].detach().cpu().numpy()
+q = snap.heads[1, :, :].detach().cpu().numpy()
+
+
+fig, axs = plt.subplots(1, 2)
+axs[0].matshow(p, cmap="Reds", vmin=0, vmax=1)
+axs[1].matshow(q, cmap="Reds", vmin=0, vmax=1)
+# %%
+
+
+adv_base_hypers = TrainHparams(
+    transformer_hparams=MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=0.5, adversarial=True)),
+    steps=300,
+    lr=0.1,
+    lr_gamma=0.995,
+    reg_coeff=10,
+    direct_out=False,
+)
+adv_ind_model = train_loop(adv_base_hypers)
+
+# %%
+snap = adv_ind_model.parameter_snapshot()
+p = snap.heads[0, :, :].detach().cpu().numpy()
+q = snap.heads[1, :, :].detach().cpu().numpy()
+
+fig, axs = plt.subplots(1, 2)
+axs[0].matshow(p, cmap="Reds", vmin=0, vmax=1)
+axs[1].matshow(q, cmap="Reds", vmin=0, vmax=1)
+
+# %% [markdown]
+
+"""
+
+"""
