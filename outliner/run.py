@@ -94,8 +94,9 @@ def log_wandb(step, snapshot, **kwargs):
 
 
 def train_loop(hparams: TrainHparams):
-    if hparams.wandb_enable:
-        run: Run = wandb.init(project="outliner", config=dataclasses.asdict(hparams))  # type: ignore
+    run = wandb.init(
+        project="outliner", config=dataclasses.asdict(hparams), mode=None if hparams.wandb_enable else "offline"
+    )
 
     if hparams.direct_out:
         model = DirectOutMixingTransformer(base_model, hparams=hparams.transformer_hparams)
@@ -133,8 +134,7 @@ def train_loop(hparams: TrainHparams):
         opt.step()
         schedule.step()
 
-    if hypers.wandb_enable:
-        run.finish()
+    run.finish(quiet=True)  # type: ignore
     return model
 
 
@@ -169,28 +169,32 @@ for i, is_direct in enumerate([True, False]):
 fig, axs = plt.subplots(2, 3, figsize=(8, 6), sharex=True, sharey=True)
 for i, is_direct in enumerate([True, False]):
     for j, reg_coeff in enumerate([0.1, 1, 10]):
+        ax = axs[i, j]
         snap = final_params[(is_direct, reg_coeff)]
-        head_final_vals = snap.heads[0, :, :].detach().cpu().numpy()
-        mlp_final_vals = snap.mlps[0, :, None].detach().cpu().numpy()
-        w = torch.cat([head_final_vals, mlp_final_vals], dim=1)
-        axs[i, j].matshow(head_final_vals, cmap="Reds", vmin=0, vmax=1)
+        w = torch.cat((snap.heads[0, :, :], snap.mlps[0, :, None]), dim=1)
+        w = w.detach().cpu().numpy()
+        ax.matshow(w, cmap="Reds", vmin=0, vmax=1)
 
+        if i == 0:
+            ax.set_title(f"reg_coeff={reg_coeff}", pad=10)
         if i == 1:
-            axs[i, j].set_xlabel("head")
-            axs[i, j].set_xticks(list(range(12)) + ["mlp"])
-            axs[i, j].xaxis.set_ticks_position("bottom")
+            ax.set_xlabel("head")
+            ax.set_xticks(range(13))
+            ax.set_xticklabels(list(range(12)) + ["M"])
+            ax.xaxis.set_ticks_position("bottom")
         if j == 0:
-            axs[i, j].set_ylabel("layer")
-            # axs[i, j].set_yticks(range(12))
+            ax.set_ylabel("layer")
+
+axs[0, 0].set_yticks(range(12))
+axs[1, 0].set_yticks(range(12))
 
 
-fig.suptitle("Importance of heads for direct paths (top) and all paths (bottom)")
+fig.suptitle("Importance of heads for direct paths (top) and all paths (bottom)", size="x-large")
 
 plt.tight_layout()
 plt.savefig("mixing_heads.png")
 
 # %%
-
 
 adv_base_hypers = TrainHparams(
     transformer_hparams=MixingTransformerHparams(
