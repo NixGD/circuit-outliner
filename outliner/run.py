@@ -1,159 +1,141 @@
 # %%
 import dataclasses
+from typing import Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from tqdm import trange
 
-import wandb
 from mixer import MixerHparams
 from mixing_transformer import (DirectOutMixingTransformer,
                                 IndirectMixingTransformer,
                                 MixingTransformerHparams)
-from utils import base_model, get_owt_dataset
-
-# %%
-# mix_model = MixingTransformer(base_model)
-
-dataset = get_owt_dataset()
-
+from train import TrainHparams, get_loss, train_loop
+from utils import get_base_model, get_owt_dataset, kl_div
 
 # %% [markdown]
 
 """
-Let's evaluate the loss of the mixed model for different values of p.
-At p=0 we are just running the model on the alt-input, but evaluating it's output against the next token from the ref-input. This results in a high loss, as the model is confidently wrong.
+# Introduction
 
-As p increases the loss should decrease, as more information from the reference prompt passes through.
+The basic operation that MixingTransformer impliments is to test a path patching hypothesis by mixing together the activations from two different inputs.
 
-At p=1 we are just running the model on the reference input, so the loss should be the same as the base model (about 3 for GPT2-sm on open web text).
+For instance, let us say that we are just mixing the output of one attention head. On our reference input it outputs $x_{ref}$, while on the alternate input it outputs $x_{alt}$. When running on the alternate input we replace $x_{ref}$ with $p*x_{ref} + (1-p)*x_{alt}$.
+
+This is, in essence, an ablation experiment that keeps the attention head 'on distribution' in a meaningful sense. It thus gives an indication of the importance of the attention head at influencing the output by distinguishing within-distribution inputs. 
+
+We can either to this for all paths between our attention head and the output (indirect mixing) or only along the direct path to the output (direct output mixing).
+
+In general we do this for many components at once, instead of just a single attention head. Each component (attention head, mlp layer, or individual neuron) has a separate $p$ parameter which we learned with gradient decent.
 """
 
-# %%
+# %% [markdown]
+
+"""
+# Simple MixingTransformer tests
+
+With p=1, our mixing transformer is just running on the ref input.
+
+With p=0, our mixing transformer is just running on the alt input -- with the execption of the direct path through the residual stream from embed to unemebed. Thus while the exact outputs aren't 
+"""
 
 
-def get_loss(model, batch_iter) -> torch.Tensor:
+def test_basic_mixing():
+    dataset = get_owt_dataset()
+    batch_iter = dataset.iter(batch_size=2)
     ref_toks = torch.stack(next(batch_iter)["toks"])
     alt_toks = torch.stack(next(batch_iter)["toks"])
-    out = model.forward(ref_toks, alt_toks)
 
-    loss = torch.nn.CrossEntropyLoss(reduction="mean")(out[:, :-1].flatten(0, 1), ref_toks[:, 1:].flatten())
-    return loss
+    gpt2 = get_base_model()
+    with torch.no_grad():
+        gpt_ref_out = gpt2(ref_toks)
+        gpt_alt_out = gpt2(alt_toks)
+
+        mixer_p1 = IndirectMixingTransformer(
+            gpt2, MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=1), mix_heads=True, mix_mlps=True)
+        )
+        mix_p1_out = mixer_p1(ref_toks, alt_toks)
+        print("kl div between mix_p1 and ref_out: ", kl_div(mix_p1_out, gpt_ref_out).item())
+        assert torch.allclose(gpt_ref_out, mix_p1_out, atol=1e-3)
+
+        mixer_p0 = IndirectMixingTransformer(
+            gpt2, MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=0), mix_heads=True, mix_mlps=True)
+        )
+        mix_p0_out = mixer_p0(ref_toks, alt_toks)
+        print("kl div between mix_p1 and ref_out: ", kl_div(mix_p0_out, gpt_alt_out).item())
+        assert kl_div(mix_p0_out, gpt_alt_out) < 0.01
 
 
-def eval_p(p: float | torch.Tensor) -> None:
+test_basic_mixing()
+# %% [markdown]
+
+"""
+We can also see how loss increases as we decrease p (and thus decrease the amount of information from the reference input that passes through).
+"""
+
+
+def get_losses_for_p(p: float | torch.Tensor, steps=10) -> Tuple[float, float]:
+    gpt2 = get_base_model()
     hparams = MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=p), mix_mlps=True)
-    model = DirectOutMixingTransformer(base_model, hparams=hparams)
+    mixer_ind = IndirectMixingTransformer(gpt2, hparams)
+    mixer_dir = DirectOutMixingTransformer(gpt2, hparams)
 
+    dataset = get_owt_dataset()
+    batch_iter = dataset.iter(batch_size=4)
+    losses_ind, losses_dir = [], []
+    with torch.no_grad():
+        for _ in trange(steps):
+            losses_ind.append(get_loss(mixer_ind, batch_iter).item())
+            losses_dir.append(get_loss(mixer_dir, batch_iter).item())
+
+    mean = lambda l: sum(l) / len(l)
+    return mean(losses_ind), mean(losses_dir)
+
+
+def gpt_avg_loss():
+    gpt2 = get_base_model()
+    dataset = get_owt_dataset()
     batch_iter = dataset.iter(batch_size=4)
     with torch.no_grad():
-        loss = get_loss(model, batch_iter).item()
-    print(f"p={p:.2f} | loss={loss:.2f}")
+        losses = [gpt2(torch.stack(next(batch_iter)["toks"]), return_type="loss").item() for _ in trange(10)]
+    return sum(losses) / len(losses)
 
 
-[eval_p(p) for p in torch.arange(0, 1.01, 0.2)]
+ps = torch.arange(0, 1.01, 0.2)
+losses = torch.tensor([get_losses_for_p(p) for p in ps])
+
+plt.plot(ps, losses[:, 0], "-o", label="indirect")
+plt.plot(ps, losses[:, 1], "-o", label="direct")
+plt.axhline(gpt_avg_loss(), color="k", label="gpt2")
+
+plt.ylabel("Loss")
+plt.xlabel("p")
+plt.gcf().set_size_inches(5, 5)
+plt.legend()
 
 # %% [markdown]
 
 """
-Some performance notes:
-```
-> %timeit torch.stack(next(batch_iter)["toks"])
-50.9 ms
+# Importance over entire dataset
 
-For batch_size=4:
-> %timeit base_model.forward(toks, return_type="loss")
-120 ms
-> %timeit mixed_model.forward(ref_toks, alt_toks)
-231 ms
-```
+Now lets see which parts of the model are most important! We'll do this for next token prediction on the entire dataset. We would expect, therefore, that ~all of the model is helpful when considering indirect connections, and that later parts of the model will be more helpful when considering direct-to-output connections.
+
+We'll run a sweep over {direct, indirect} and {0.1, 1, 10} regularization coefficient. Higher regularization coefficients make it more expensive to include components. With a regularization coefficient of 1, including all heads and all mlps adds 2 to the loss (comparible to gpt small's natural loss of ~3).
+
+We'll also add an adversary to the above experiment. This is a player that can increase the value of p for certain components -- effectively force them to not be mixed. However, the adversary is trying to _maximize_ the model loss. This is helpful to ensure that if there are multiple heads which cancel eachother out we include all of them.
+
+Components in red are included by the adversary.
+
 """
-# %%
-
-
-@dataclasses.dataclass
-class TrainHparams:
-    transformer_hparams: MixingTransformerHparams = MixingTransformerHparams()
-    batch_size: int = 4
-    steps: int = 500
-    lr: float = 1e-4
-    lr_gamma: float = 0.99
-    direct_out: bool = False
-    reg_coeff: float = 1
-    wandb_enable: bool = True
-
-
-test_hypers = TrainHparams(steps=10, wandb_enable=False)
-
-
-def log_wandb(step, snapshot, **kwargs):
-    to_log = kwargs
-    to_log["heads/p/mean"] = snapshot.heads[0].mean().item()
-    to_log["heads/q/mean"] = snapshot.heads[1].mean().item() if snapshot.heads.shape[0] > 1 else None
-    wandb.log(to_log)
-
-
-def train_loop(hparams: TrainHparams):
-    run = wandb.init(
-        project="outliner", config=dataclasses.asdict(hparams), mode=None if hparams.wandb_enable else "offline"
-    )
-
-    if hparams.direct_out:
-        model = DirectOutMixingTransformer(base_model, hparams=hparams.transformer_hparams)
-    else:
-        model = IndirectMixingTransformer(base_model, hparams=hparams.transformer_hparams)
-    opt = torch.optim.Adam(model.mixer_parameters(), lr=hparams.lr)
-    schedule = torch.optim.lr_scheduler.ExponentialLR(opt, hparams.lr_gamma)
-    batch_iter = dataset.iter(hparams.batch_size)
-
-    for step in trange(hparams.steps):
-        model_loss = get_loss(model, batch_iter)
-        snap = model.parameter_snapshot()
-
-        # the len(w) factor means that the total regularization penalty is twice as large if there's an adversary
-        # this keeps protaganist behavior comparable with and without an adversary
-        get_reg_loss = lambda w: w.mean() * reg_coeff * len(w) if w is not None else torch.tensor(0)
-        head_reg_loss, mlp_reg_loss, neuron_reg_loss = [get_reg_loss(w) for w in (snap.heads, snap.mlps, snap.neurons)]
-        reg_loss = head_reg_loss + mlp_reg_loss + neuron_reg_loss
-        loss = model_loss + reg_loss
-
-        log_wandb(
-            step,
-            snap,
-            loss=loss.item(),
-            model_loss=model_loss.item(),
-            reg_loss=reg_loss.item(),
-            head_reg_loss=head_reg_loss.item(),
-            mlp_reg_loss=mlp_reg_loss.item(),
-            neuron_reg_loss=neuron_reg_loss.item(),
-            lr=schedule.get_last_lr()[0],
-        )
-
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-        schedule.step()
-
-    run.finish(quiet=True)  # type: ignore
-    return model
-
-
-# %% [markdown]
-
 
 base_hypers = TrainHparams(
     transformer_hparams=MixingTransformerHparams(
         mixer_hparams=MixerHparams(init_p=0.5, adversarial=True), mix_mlps=True
     ),
-    steps=150,
-    lr=0.1,
-    lr_gamma=0.995,
-    reg_coeff=10,
 )
 
 final_params = {}
-
-fig, axs = plt.subplots(2, 3, figsize=(10, 7), sharex=True, sharey=True)
 
 for i, is_direct in enumerate([True, False]):
     for j, reg_coeff in enumerate([0.1, 1, 10]):
@@ -163,84 +145,67 @@ for i, is_direct in enumerate([True, False]):
         snap = trained_model.parameter_snapshot()
         final_params[(is_direct, reg_coeff)] = snap
 
-
 # %%
+
+def label_axes(axs):
+    for ax in axs[:, 0]:
+        ax.set_ylabel("layer")
+        ax.set_yticks(range(12))
+    for ax in axs[-1, :]:
+        ax.set_xlabel("head")
+        ax.set_xticks(range(13))
+        ax.set_xticklabels(list(range(12)) + ["M"])
+        ax.xaxis.set_ticks_position("bottom")
 
 fig, axs = plt.subplots(2, 3, figsize=(8, 6), sharex=True, sharey=True)
 for i, is_direct in enumerate([True, False]):
     for j, reg_coeff in enumerate([0.1, 1, 10]):
-        ax = axs[i, j]
+        ax = axs[i, j] # type: ignore
         snap = final_params[(is_direct, reg_coeff)]
-        w = torch.cat((snap.heads[0, :, :], snap.mlps[0, :, None]), dim=1)
+        w = torch.cat((snap.heads, snap.mlps.unsqueeze(2)), dim=2)
+        w = w[0] - w[1]  # we sum over protaganist and adversary weights
         w = w.detach().cpu().numpy()
-        ax.matshow(w, cmap="Reds", vmin=0, vmax=1)
+        ax.matshow(w, cmap="RdBu", vmin=-1, vmax=1)
 
         if i == 0:
             ax.set_title(f"reg_coeff={reg_coeff}", pad=10)
-        if i == 1:
-            ax.set_xlabel("head")
-            ax.set_xticks(range(13))
-            ax.set_xticklabels(list(range(12)) + ["M"])
-            ax.xaxis.set_ticks_position("bottom")
-        if j == 0:
-            ax.set_ylabel("layer")
 
-axs[0, 0].set_yticks(range(12))
-axs[1, 0].set_yticks(range(12))
-
-
+label_axes(axs)
 fig.suptitle("Importance of heads for direct paths (top) and all paths (bottom)", size="x-large")
-
 plt.tight_layout()
 plt.savefig("mixing_heads.png")
 
-# %%
+# %% [markdown]
 
-adv_base_hypers = TrainHparams(
+"""What happens if we remove the adversary?"""
+
+no_adv_hypers = TrainHparams(
     transformer_hparams=MixingTransformerHparams(
-        mixer_hparams=MixerHparams(init_p=0.5, adversarial=True), mix_mlps=True
+        mixer_hparams=MixerHparams(init_p=0.5, adversarial=False), mix_mlps=True
     ),
-    steps=150,
-    lr=0.1,
-    lr_gamma=0.995,
     reg_coeff=10,
     direct_out=True,
 )
-noadv_model = train_loop(adv_base_hypers)
-
-# %%
-snap = noadv_model.parameter_snapshot()
-p = snap.heads[0, :, :].detach().cpu().numpy()
-q = snap.heads[1, :, :].detach().cpu().numpy()
-
-
-fig, axs = plt.subplots(1, 2)
-axs[0].matshow(p, cmap="Reds", vmin=0, vmax=1)
-axs[1].matshow(q, cmap="Reds", vmin=0, vmax=1)
+no_adv_model = train_loop(no_adv_hypers)
 # %%
 
+adv_snap = final_params[(True, 10)]
+adv_w = torch.cat((adv_snap.heads, adv_snap.mlps.unsqueeze(2)), dim=2).cpu().detach()
 
-adv_base_hypers = TrainHparams(
-    transformer_hparams=MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=0.5, adversarial=True)),
-    steps=300,
-    lr=0.1,
-    lr_gamma=0.995,
-    reg_coeff=10,
-    direct_out=False,
-)
-adv_ind_model = train_loop(adv_base_hypers)
+no_adv_snap = no_adv_model.parameter_snapshot()
+no_adv_w = torch.cat((no_adv_snap.heads, no_adv_snap.mlps.unsqueeze(2)), dim=2).cpu().detach() #type: ignore
 
-# %%
-snap = adv_ind_model.parameter_snapshot()
-p = snap.heads[0, :, :].detach().cpu().numpy()
-q = snap.heads[1, :, :].detach().cpu().numpy()
+fig, axs = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(6, 6))
+axs[0, 0].matshow(no_adv_w[0], cmap="RdBu", vmin=-1, vmax=1)
+axs[0, 1].matshow(torch.ones_like(no_adv_w[0]), cmap="Greys", vmin=0, vmax=2)
+axs[1, 0].matshow(adv_w[0], cmap="RdBu", vmin=-1, vmax=1)
+axs[1, 1].matshow(adv_w[1], cmap="RdBu_r", vmin=-1, vmax=1)
 
-fig, axs = plt.subplots(1, 2)
-axs[0].matshow(p, cmap="Reds", vmin=0, vmax=1)
-axs[1].matshow(q, cmap="Reds", vmin=0, vmax=1)
+label_axes(axs)
+
+plt.tight_layout()
 
 # %% [markdown]
-
 """
-
+The set of heads that the protaganist finds is the same without an adversary. It does choose somewhat smaller weights for some heads without an adversary present. 
 """
