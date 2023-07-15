@@ -5,7 +5,8 @@ from typing import Iterable, Optional, Tuple
 import einops
 import torch
 from torch import nn
-from transformer_lens import ActivationCache, HookedTransformer, HookedTransformerConfig
+from transformer_lens import (ActivationCache, HookedTransformer,
+                              HookedTransformerConfig)
 from transformer_lens.hook_points import HookPoint
 
 from mixer import LocType, Mixer, MixerHparams
@@ -24,6 +25,10 @@ class ParameterSnapshot:
     heads: Optional[torch.Tensor] = None  # [adversary, layer, heads]
     neurons: Optional[torch.Tensor] = None  # [adversary, layer, neuron]
     mlps: Optional[torch.Tensor] = None  # [adversary, layer]
+
+    def heads_and_mlps(self):
+        assert self.heads is not None and self.mlps is not None
+        return torch.cat((self.heads, self.mlps.unsqueeze(2)), dim=2).detach().cpu()
 
 
 class MixingTransformer(nn.Module):

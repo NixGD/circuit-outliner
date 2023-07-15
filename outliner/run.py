@@ -1,6 +1,6 @@
 # %%
 import dataclasses
-from typing import Tuple
+from typing import Dict, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,9 +10,9 @@ from tqdm import trange
 from mixer import MixerHparams
 from mixing_transformer import (DirectOutMixingTransformer,
                                 IndirectMixingTransformer,
-                                MixingTransformerHparams)
-from train import TrainHparams, get_loss, train_loop
-from utils import get_base_model, get_owt_dataset, kl_div
+                                MixingTransformerHparams, ParameterSnapshot)
+from train import TrainHparams, get_loss, lm_loss, train_loop
+from utils import DEVICE, get_base_model, get_owt_dataset, kl_div
 
 # %% [markdown]
 
@@ -75,7 +75,7 @@ We can also see how loss increases as we decrease p (and thus decrease the amoun
 """
 
 
-def get_losses_for_p(p: float | torch.Tensor, steps=10) -> Tuple[float, float]:
+def get_losses_for_p(p: float | torch.Tensor, steps=10, loss_fn=lm_loss) -> Tuple[float, float]:
     gpt2 = get_base_model()
     hparams = MixingTransformerHparams(mixer_hparams=MixerHparams(init_p=p), mix_mlps=True)
     mixer_ind = IndirectMixingTransformer(gpt2, hparams)
@@ -86,14 +86,14 @@ def get_losses_for_p(p: float | torch.Tensor, steps=10) -> Tuple[float, float]:
     losses_ind, losses_dir = [], []
     with torch.no_grad():
         for _ in trange(steps):
-            losses_ind.append(get_loss(mixer_ind, batch_iter).item())
-            losses_dir.append(get_loss(mixer_dir, batch_iter).item())
+            losses_ind.append(get_loss(mixer_ind, batch_iter, loss_fn=lm_loss).item())
+            losses_dir.append(get_loss(mixer_dir, batch_iter, loss_fn=lm_loss).item())
 
     mean = lambda l: sum(l) / len(l)
     return mean(losses_ind), mean(losses_dir)
 
 
-def gpt_avg_loss():
+def get_gpt_avg_loss():
     gpt2 = get_base_model()
     dataset = get_owt_dataset()
     batch_iter = dataset.iter(batch_size=4)
@@ -107,7 +107,7 @@ losses = torch.tensor([get_losses_for_p(p) for p in ps])
 
 plt.plot(ps, losses[:, 0], "-o", label="indirect")
 plt.plot(ps, losses[:, 1], "-o", label="direct")
-plt.axhline(gpt_avg_loss(), color="k", label="gpt2")
+plt.axhline(get_gpt_avg_loss(), color="k", label="gpt2")
 
 plt.ylabel("Loss")
 plt.xlabel("p")
@@ -133,12 +133,13 @@ base_hypers = TrainHparams(
     transformer_hparams=MixingTransformerHparams(
         mixer_hparams=MixerHparams(init_p=0.5, adversarial=True), mix_mlps=True
     ),
+    steps=75,
 )
 
-final_params = {}
+final_params: Dict[Tuple, ParameterSnapshot] = {}
 
 for i, is_direct in enumerate([True, False]):
-    for j, reg_coeff in enumerate([0.1, 1, 10]):
+    for j, reg_coeff in enumerate([0.3, 1, 3]):
         hypers = dataclasses.replace(base_hypers, direct_out=is_direct, reg_coeff=reg_coeff)
         trained_model = train_loop(hypers)
 
@@ -146,6 +147,7 @@ for i, is_direct in enumerate([True, False]):
         final_params[(is_direct, reg_coeff)] = snap
 
 # %%
+
 
 def label_axes(axs):
     for ax in axs[:, 0]:
@@ -157,15 +159,13 @@ def label_axes(axs):
         ax.set_xticklabels(list(range(12)) + ["M"])
         ax.xaxis.set_ticks_position("bottom")
 
+
 fig, axs = plt.subplots(2, 3, figsize=(8, 6), sharex=True, sharey=True)
 for i, is_direct in enumerate([True, False]):
-    for j, reg_coeff in enumerate([0.1, 1, 10]):
-        ax = axs[i, j] # type: ignore
-        snap = final_params[(is_direct, reg_coeff)]
-        w = torch.cat((snap.heads, snap.mlps.unsqueeze(2)), dim=2)
-        w = w[0] - w[1]  # we sum over protaganist and adversary weights
-        w = w.detach().cpu().numpy()
-        ax.matshow(w, cmap="RdBu", vmin=-1, vmax=1)
+    for j, reg_coeff in enumerate([0.3, 1, 3]):
+        ax = axs[i, j]  # type: ignore
+        w = final_params[(is_direct, reg_coeff)].heads_and_mlps()
+        ax.matshow(w[0] - w[1], cmap="RdBu", vmin=-1, vmax=1)
 
         if i == 0:
             ax.set_title(f"reg_coeff={reg_coeff}", pad=10)
@@ -177,23 +177,25 @@ plt.savefig("mixing_heads.png")
 
 # %% [markdown]
 
-"""What happens if we remove the adversary?"""
+"""
+What happens if we remove the adversary?
+
+As we see below, the set of heads that the protaganist finds is the same without an adversary. It does choose somewhat smaller weights for some heads without an adversary present. 
+"""
 
 no_adv_hypers = TrainHparams(
     transformer_hparams=MixingTransformerHparams(
         mixer_hparams=MixerHparams(init_p=0.5, adversarial=False), mix_mlps=True
     ),
-    reg_coeff=10,
+    reg_coeff=3,
     direct_out=True,
 )
 no_adv_model = train_loop(no_adv_hypers)
+
 # %%
 
-adv_snap = final_params[(True, 10)]
-adv_w = torch.cat((adv_snap.heads, adv_snap.mlps.unsqueeze(2)), dim=2).cpu().detach()
-
-no_adv_snap = no_adv_model.parameter_snapshot()
-no_adv_w = torch.cat((no_adv_snap.heads, no_adv_snap.mlps.unsqueeze(2)), dim=2).cpu().detach() #type: ignore
+adv_w = final_params[(True, 3)].heads_and_mlps()
+no_adv_w = final_params[(True, 3)].heads_and_mlps()
 
 fig, axs = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(6, 6))
 axs[0, 0].matshow(no_adv_w[0], cmap="RdBu", vmin=-1, vmax=1)
@@ -204,8 +206,124 @@ axs[1, 1].matshow(adv_w[1], cmap="RdBu_r", vmin=-1, vmax=1)
 label_axes(axs)
 
 plt.tight_layout()
+plt.savefig("adv vs no adv comparison.png")
 
 # %% [markdown]
+
 """
-The set of heads that the protaganist finds is the same without an adversary. It does choose somewhat smaller weights for some heads without an adversary present. 
+# Testing on a specific classification subtask
 """
+
+tokenizer = get_base_model().tokenizer
+all_tokens = tokenizer.batch_decode(range(tokenizer.vocab_size))
+eos_toks_ids = [i for i, s in enumerate(all_tokens) if s.startswith((".", "!", "?", ";"))]
+eos_toks_ids = torch.tensor(eos_toks_ids, device=DEVICE)
+
+
+def eos_loss(logits, labels) -> torch.Tensor:
+    """
+    logits: [batch, seqlen-1, vocab_size]
+    labels: [batch, seqlen-1]
+    """
+    prob_of_eos = logits.softmax(-1)[:, :, eos_toks_ids].sum(-1)
+    is_eos = torch.isin(labels, eos_toks_ids).float()
+    return torch.nn.functional.binary_cross_entropy(prob_of_eos, is_eos)
+
+
+def get_gpt_eos_loss():
+    gpt2 = get_base_model()
+    dataset = get_owt_dataset()
+    batch_iter = dataset.iter(batch_size=40)
+    losses = []
+    with torch.no_grad():
+        for _ in trange(2):
+            toks = torch.stack(next(batch_iter)["toks"])
+            out = gpt2(toks)
+            losses.append(eos_loss(out[:, :-1], toks[:, 1:]).item())
+
+    return sum(losses) / len(losses)
+
+
+gpt_eos_loss = get_gpt_eos_loss()
+print(gpt_avg_loss)
+# %%
+
+eos_hypers = TrainHparams(
+    transformer_hparams=MixingTransformerHparams(
+        mixer_hparams=MixerHparams(init_p=0.5, adversarial=True), mix_mlps=True
+    ),
+    reg_coeff=0.1,
+    direct_out=True,
+    loss_fn=eos_loss,
+)
+eos_model = train_loop(eos_hypers)
+
+snap = eos_model.parameter_snapshot()
+w = snap.heads_and_mlps()
+plt.matshow(w[0] - w[1], cmap="RdBu", vmin=-1, vmax=1)
+
+# %%
+
+eos_model_ind = train_loop(dataclasses.replace(eos_hypers, direct_out=False))
+
+# %%
+
+snap = eos_model_ind.parameter_snapshot()
+w = snap.heads_and_mlps()
+plt.matshow(w[0] - w[1], cmap="RdBu", vmin=-1, vmax=1)
+
+# %%
+
+
+# %%
+
+def eval_model(model, loss_fn=lm_loss):
+    model.eval()
+    batch_iter = get_owt_dataset().skip(1000).iter(32)
+    with torch.no_grad():
+        losses = torch.stack([get_loss(model, batch_iter, loss_fn) for _ in trange(5)])
+        return losses.mean().item()
+
+base_hypers = TrainHparams(
+    transformer_hparams=MixingTransformerHparams(
+        mixer_hparams=MixerHparams(init_p=0.8, adversarial=False), mix_mlps=True
+    ),
+    direct_out=False,
+    steps=100,
+    wandb_enable=False,
+)
+
+flat_ps =  torch.arange(0, 1.01, 0.2)
+losses_for_flat_ps = torch.tensor([get_losses_for_p(p) for p in flat_ps])
+gpt_avg_loss = get_gpt_avg_loss()
+
+# %%
+
+reg_coeffs = [0.25, 0.5, 1, 2, 3, 4, 5, 7, 10]
+losses = []
+avg_ps = []
+
+for reg_coeff in reg_coeffs:
+    hypers = dataclasses.replace(base_hypers, reg_coeff=reg_coeff)
+    model = train_loop(hypers)
+    loss = eval_model(model)
+    losses.append(loss)
+
+    snap = model.parameter_snapshot()
+    # p + q. Technically p + q - pq would be better, but in practice they are equal
+    avg_p = (snap.heads.sum(0).mean() + snap.mlps.sum(0).mean()).item() / 2
+    avg_ps.append(avg_p)
+    print(f"{reg_coeff=} {loss=} {avg_p=}")
+
+    fig, ax = plt.subplots(1,1)
+    ax.plot(ps, losses_for_flat_ps[:, 0], "-o", label="indirect")
+    ax.axhline(gpt_avg_loss, color="k", label="gpt2")
+    ax.plot(avg_ps, losses)
+    fig.savefig("indirect_frontier.png")
+
+# %%
+
+
+
+
+# %%

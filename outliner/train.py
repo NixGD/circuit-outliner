@@ -1,38 +1,18 @@
 import dataclasses
+from typing import Callable
 
 import torch
 from tqdm import trange
 from transformer_lens import HookedTransformer
 
 import wandb
-from mixing_transformer import (DirectOutMixingTransformer,
-                                IndirectMixingTransformer, MixingTransformer,
-                                MixingTransformerHparams)
-from utils import DEVICE, get_owt_dataset, get_base_model
-
-
-@dataclasses.dataclass(frozen=True)
-class TrainHparams:
-    base_model: str = "gpt2-small"
-    transformer_hparams: MixingTransformerHparams = MixingTransformerHparams()
-    batch_size: int = 4
-    steps: int = 200
-    lr: float = 0.1
-    lr_gamma: float = 0.995
-    direct_out: bool = False
-    reg_coeff: float = 1
-    wandb_enable: bool = True
-
-
-test_hypers = TrainHparams(steps=10, wandb_enable=False)
-
-
-def get_mixer_model(hparams=TrainHparams) -> MixingTransformer:
-    base_model = get_base_model(hparams.base_model)
-    if hparams.direct_out:
-        return DirectOutMixingTransformer(base_model, hparams=hparams.transformer_hparams)
-    else:
-        return IndirectMixingTransformer(base_model, hparams=hparams.transformer_hparams)
+from mixing_transformer import (
+    DirectOutMixingTransformer,
+    IndirectMixingTransformer,
+    MixingTransformer,
+    MixingTransformerHparams,
+)
+from utils import DEVICE, get_base_model, get_owt_dataset
 
 
 def lm_loss(logits, labels) -> torch.Tensor:
@@ -47,10 +27,41 @@ def lm_loss(logits, labels) -> torch.Tensor:
     return torch.nn.functional.cross_entropy(logits.flatten(0, 1), labels.flatten(), reduction="mean")
 
 
-def get_loss(model, batch_iter, loss_fn=lm_loss) -> torch.Tensor:
+LossFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+@dataclasses.dataclass(frozen=True)
+class TrainHparams:
+    base_model: str = "gpt2-small"
+    transformer_hparams: MixingTransformerHparams = MixingTransformerHparams()
+    batch_size: int = 4
+    steps: int = 200
+    lr: float = 0.1
+    lr_gamma: float = 0.995
+    direct_out: bool = False
+    reg_coeff: float = 1
+    wandb_enable: bool = True
+    loss_fn: LossFn = lm_loss
+
+
+test_hypers = TrainHparams(steps=10, wandb_enable=False)
+
+
+def get_mixer_model(hparams: TrainHparams) -> MixingTransformer:
+    base_model = get_base_model(hparams.base_model)
+    if hparams.direct_out:
+        return DirectOutMixingTransformer(base_model, hparams=hparams.transformer_hparams)
+    else:
+        return IndirectMixingTransformer(base_model, hparams=hparams.transformer_hparams)
+
+
+def get_loss(model, batch_iter, loss_fn: LossFn = lm_loss, mix=True) -> torch.Tensor:
     ref_toks = torch.stack(next(batch_iter)["toks"])
-    alt_toks = torch.stack(next(batch_iter)["toks"])
-    out = model.forward(ref_toks, alt_toks)
+    if mix:
+        alt_toks = torch.stack(next(batch_iter)["toks"])
+        out = model.forward(ref_toks, alt_toks)
+    else:
+        out = model.forward(ref_toks)
     return loss_fn(out[:, :-1], ref_toks[:, 1:])
 
 
@@ -63,9 +74,10 @@ def log_wandb(step, snapshot, **kwargs):
 
 def train_loop(hparams: TrainHparams):
     run = wandb.init(
-        project="outliner", config=dataclasses.asdict(hparams), mode=None if hparams.wandb_enable else "offline"
+        project="outliner", config=dataclasses.asdict(hparams), mode=None if hparams.wandb_enable else "disable"
     )
     model = get_mixer_model(hparams)
+    model.train()
     opt = torch.optim.Adam(model.mixer_parameters(), lr=hparams.lr)
     schedule = torch.optim.lr_scheduler.ExponentialLR(opt, hparams.lr_gamma)
 
@@ -73,7 +85,7 @@ def train_loop(hparams: TrainHparams):
     batch_iter = dataset.iter(hparams.batch_size)
 
     for step in trange(hparams.steps):
-        model_loss = get_loss(model, batch_iter)
+        model_loss = get_loss(model, batch_iter, loss_fn=hparams.loss_fn)
         snap = model.parameter_snapshot()
 
         # the len(w) factor means that the total regularization penalty is twice as large if there's an adversary
@@ -101,4 +113,5 @@ def train_loop(hparams: TrainHparams):
         schedule.step()
 
     run.finish(quiet=True)  # type: ignore
+
     return model
