@@ -74,7 +74,7 @@ def log_wandb(step, snapshot, **kwargs):
 
 def train_loop(hparams: TrainHparams):
     run = wandb.init(
-        project="outliner", config=dataclasses.asdict(hparams), mode=None if hparams.wandb_enable else "disable"
+        project="outliner", config=dataclasses.asdict(hparams), mode=None if hparams.wandb_enable else "disabled"
     )
     model = get_mixer_model(hparams)
     model.train()

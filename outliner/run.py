@@ -245,7 +245,7 @@ def get_gpt_eos_loss():
 
 
 gpt_eos_loss = get_gpt_eos_loss()
-print(gpt_avg_loss)
+print(gpt_eos_loss)
 # %%
 
 eos_hypers = TrainHparams(
@@ -275,8 +275,6 @@ plt.matshow(w[0] - w[1], cmap="RdBu", vmin=-1, vmax=1)
 # %%
 
 
-# %%
-
 def eval_model(model, loss_fn=lm_loss):
     model.eval()
     batch_iter = get_owt_dataset().skip(1000).iter(32)
@@ -284,16 +282,16 @@ def eval_model(model, loss_fn=lm_loss):
         losses = torch.stack([get_loss(model, batch_iter, loss_fn) for _ in trange(5)])
         return losses.mean().item()
 
+
 base_hypers = TrainHparams(
     transformer_hparams=MixingTransformerHparams(
         mixer_hparams=MixerHparams(init_p=0.8, adversarial=False), mix_mlps=True
     ),
     direct_out=False,
-    steps=100,
-    wandb_enable=False,
+    steps=75,
 )
 
-flat_ps =  torch.arange(0, 1.01, 0.2)
+flat_ps = torch.arange(0, 1.01, 0.2)
 losses_for_flat_ps = torch.tensor([get_losses_for_p(p) for p in flat_ps])
 gpt_avg_loss = get_gpt_avg_loss()
 
@@ -315,15 +313,13 @@ for reg_coeff in reg_coeffs:
     avg_ps.append(avg_p)
     print(f"{reg_coeff=} {loss=} {avg_p=}")
 
-    fig, ax = plt.subplots(1,1)
+    fig, ax = plt.subplots(1, 1)
     ax.plot(ps, losses_for_flat_ps[:, 0], "-o", label="indirect")
     ax.axhline(gpt_avg_loss, color="k", label="gpt2")
     ax.plot(avg_ps, losses)
     fig.savefig("indirect_frontier.png")
 
 # %%
-
-
-
-
+with open("../data/frontier_indirect.json", "w") as f:
+    json.dump({"reg_coeffs": reg_coeffs, "losses": losses, "avg_ps": avg_ps}, f)
 # %%
