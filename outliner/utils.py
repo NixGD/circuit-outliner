@@ -1,4 +1,7 @@
+import json
+import os
 from functools import cache
+from typing import Callable
 
 import datasets
 import torch
@@ -22,13 +25,16 @@ def get_owt_dataset(min_len=1024):
 
     def add_tok_columns(dataset_batch):
         dataset_batch["toks"] = base_model.to_tokens(dataset_batch["text"])
-        dataset_batch["seqlen"] = (dataset_batch["toks"] != base_model.tokenizer.pad_token_id).sum(-1) + 1
+        dataset_batch["seqlen"] = (dataset_batch["toks"] != base_model.tokenizer.pad_token_id).sum(-1) + 1 # type: ignore
         return dataset_batch
 
     dataset = dataset.map(add_tok_columns, batched=True, batch_size=10)
     dataset = dataset.filter(lambda x: x["seqlen"] >= min_len)
     return dataset
 
+
+def next_toks(batch_iter):
+    return torch.stack(next(batch_iter)["toks"])
 
 class ReverseGrad(torch.autograd.Function):
     @staticmethod

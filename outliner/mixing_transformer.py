@@ -13,11 +13,10 @@ from mixer import LocType, Mixer, MixerHparams
 
 
 @dataclass(frozen=True)
-class MixingTransformerHparams:
+class MixingTransformerHparams(MixerHparams):
     mix_heads: bool = True
     mix_neurons: bool = False  # 1 parameter per neuron
     mix_mlps: bool = False  # 1 parameter per layer
-    mixer_hparams: MixerHparams = MixerHparams()
 
 
 @dataclass
@@ -26,10 +25,10 @@ class ParameterSnapshot:
     neurons: Optional[torch.Tensor] = None  # [adversary, layer, neuron]
     mlps: Optional[torch.Tensor] = None  # [adversary, layer]
 
-    def heads_and_mlps(self):
+    def heads_and_mlps(self, diff=False):
         assert self.heads is not None and self.mlps is not None
-        return torch.cat((self.heads, self.mlps.unsqueeze(2)), dim=2).detach().cpu()
-
+        w = torch.cat((self.heads, self.mlps.unsqueeze(2)), dim=2).detach().cpu()
+        return w[0] - w[1] if diff else w
 
 class MixingTransformer(nn.Module):
     def forward(self):
@@ -56,18 +55,14 @@ class IndirectMixingTransformer(MixingTransformer):
         self.mixers = {}  # will be in model order
         for l in range(self.cfg.n_layers):
             if self.hparams.mix_heads:
-                self.mixers[f"blocks.{l}.attn.hook_z"] = Mixer(
-                    (self.cfg.n_heads, 1), "head", hparams=self.hparams.mixer_hparams
-                )
+                self.mixers[f"blocks.{l}.attn.hook_z"] = Mixer((self.cfg.n_heads, 1), "head", hparams=self.hparams)
             if self.hparams.mix_neurons:
                 assert not self.hparams.mix_mlps
                 assert self.cfg.d_mlp is not None
-                self.mixers[f"blocks.{l}.mlp.hook_post"] = Mixer(
-                    (self.cfg.d_mlp,), "neuron", hparams=self.hparams.mixer_hparams
-                )
+                self.mixers[f"blocks.{l}.mlp.hook_post"] = Mixer((self.cfg.d_mlp,), "neuron", hparams=self.hparams)
             if self.hparams.mix_mlps:
                 assert not self.hparams.mix_neurons
-                self.mixers[f"blocks.{l}.hook_mlp_out"] = Mixer((1,), "mlp", hparams=self.hparams.mixer_hparams)
+                self.mixers[f"blocks.{l}.hook_mlp_out"] = Mixer((1,), "mlp", hparams=self.hparams)
 
     def forward(self, ref_in: torch.Tensor, alt_in: torch.Tensor, **kwargs) -> torch.Tensor:
         ins = torch.cat([ref_in, alt_in], dim=0)
@@ -94,7 +89,7 @@ class IndirectMixingTransformer(MixingTransformer):
             if len(ms) == 0:
                 return None
             ps = torch.stack([m.p for m in ms], dim=0).squeeze()
-            if self.hparams.mixer_hparams.adversarial:
+            if self.hparams.adversarial:
                 qs = torch.stack([m.q for m in ms], dim=0).squeeze()
                 return torch.stack([ps, qs], dim=0)
             else:
@@ -121,14 +116,14 @@ class DirectOutMixingTransformer(MixingTransformer):
         self.mixers = {}
         if self.hparams.mix_heads:
             self.mixers["head"] = Mixer(
-                (self.cfg.n_layers, self.cfg.n_heads, 1), "head", hparams=self.hparams.mixer_hparams
+                (self.cfg.n_layers, self.cfg.n_heads, 1), "head", hparams=self.hparams
             )
         if self.hparams.mix_neurons:
             assert not self.hparams.mix_mlps
             raise NotImplementedError
         if self.hparams.mix_mlps:
             assert not self.hparams.mix_neurons
-            self.mixers["mlp"] = Mixer((self.cfg.n_layers, 1), "mlp", hparams=self.hparams.mixer_hparams)
+            self.mixers["mlp"] = Mixer((self.cfg.n_layers, 1), "mlp", hparams=self.hparams)
 
     def _residual_diff_for_heads(self, cache: ActivationCache, ref_idxs: torch.Tensor):
         cache.compute_head_results()
