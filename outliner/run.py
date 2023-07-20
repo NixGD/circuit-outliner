@@ -133,7 +133,11 @@ base_hypers = TrainHparams(
     wandb_enable=False,
     steps=100,
 )
-hyper_list = [dataclasses.replace(base_hypers, direct_out=is_direct, reg_coeff=reg_coeff) for is_direct in is_direct_options for reg_coeff in reg_coeff_options]
+hyper_list = [
+    dataclasses.replace(base_hypers, direct_out=is_direct, reg_coeff=reg_coeff)
+    for is_direct in is_direct_options
+    for reg_coeff in reg_coeff_options
+]
 # this function runs a sweep of the hparam list, if not cached.
 sweep_infos = run_sweep("importance_sweep", hyper_list)
 
@@ -217,8 +221,9 @@ tokenizer: PreTrainedTokenizerBase = get_base_model().tokenizer  # type: ignore
 all_tokens = tokenizer.batch_decode(range(tokenizer.vocab_size))
 eos_toks_ids = [i for i, s in enumerate(all_tokens) if s.startswith((".", "!", "?", ";"))]
 
-eos_base_hypers = dataclasses.replace(base_hypers, 
-    reg_coeff=0.1, # the loss diff between p=0 and p=1 is very small, which requires a smaller reg_coeff
+eos_base_hypers = dataclasses.replace(
+    base_hypers,
+    reg_coeff=0.1,  # the loss diff between p=0 and p=1 is very small, which requires a smaller reg_coeff
     classification_subset=eos_toks_ids,
 )
 eos_hyper_list = [eos_base_hypers, dataclasses.replace(eos_base_hypers, direct_out=True)]
@@ -229,27 +234,47 @@ print(f"Direct loss: {eos_direct_info.val_loss:.3f}")
 print(f"Indirect loss: {eos_indirect_info.val_loss:.3f}")
 
 fig, axs = plt.subplots(1, 2, sharey=True, figsize=(8, 4), squeeze=False)
-axs[0,0].matshow(eos_indirect_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1)
-axs[0,1].matshow(eos_direct_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1)
+axs[0, 0].matshow(eos_indirect_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1)
+axs[0, 1].matshow(eos_direct_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1)
 label_axes(axs)
-axs[0,0].set_title("Indirect")
-axs[0,1].set_title("Direct")
+axs[0, 0].set_title("Indirect")
+axs[0, 1].set_title("Direct")
 
 # %%
 
-reg_coeffs = [0.5, 1, 2, 4, 8, 12, 16, 20]
+reg_coeffs = [0.5, 1, 2, 4, 8, 12, 13, 13.5, 14, 16, 20, 28]
 frontier_hyper_list = [dataclasses.replace(base_hypers, reg_coeff=c) for c in reg_coeffs]
-frontier_infos = run_sweep("frontier", frontier_hyper_list)
+frontier_indirect_infos = run_sweep("frontier_indirect", frontier_hyper_list)
 
+reg_coeffs = [0.5, 1, 2, 4, 8, 12, 14, 16, 20, 28]
+frontier_hyper_list = [dataclasses.replace(base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs]
+frontier_direct_infos = run_sweep("frontier_direct", frontier_hyper_list)
 # %%
 
 flat_losses = get_maybe_cached("losses_for_p", compute_losses_for_p)
-plt.plot(flat_losses["ps"], flat_losses["indirect_losses"], "-o", label="flat")
-plt.gca().axhline(flat_losses["gpt_avg_loss"], color="k", label="gpt2")
 
-get_mean_p = lambda info: (info.snapshot.heads.mean().item() + info.snapshot.mlps.mean().item())/2
-plt.plot([get_mean_p(info) for info in frontier_infos], [info.val_loss for info in frontier_infos], "-o", label="frontier")
+fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+axs[0].plot(flat_losses["ps"], flat_losses["indirect_losses"], "-o", label="flat")
+axs[0].axhline(flat_losses["gpt_avg_loss"], color="k", label="gpt2")
 
-fig.savefig("indirect_frontier.png")
+get_mean_p = lambda info: (info.snapshot.heads[0].mean().item() + info.snapshot.mlps[0].mean().item()) / 2
+axs[0].plot(
+    [get_mean_p(info) for info in frontier_indirect_infos], [info.val_loss for info in frontier_indirect_infos], "-o", label="frontier"
+)
 
+axs[0].set_xlabel("Mean p")
+axs[0].set_ylabel("Loss")
+
+axs[1].plot(flat_losses["ps"], flat_losses["direct_losses"], "-o", label="flat")
+axs[1].axhline(flat_losses["gpt_avg_loss"], color="k", label="gpt2")
+
+axs[1].plot(
+    [get_mean_p(info) for info in frontier_direct_infos], [info.val_loss for info in frontier_direct_infos], "-o", label="frontier"
+)
+
+plt.xlabel("Mean p")
+
+fig.savefig("direct_frontier.png")
+plt.tight_layout()
+fig.savefig("frontiers.png")
 # %%
