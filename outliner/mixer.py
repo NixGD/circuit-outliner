@@ -13,6 +13,7 @@ class MixerHparams:
     init_q: float = 0.1
     adversarial: bool = False
 
+
 LocType = Literal["head", "neuron", "mlp"]
 
 

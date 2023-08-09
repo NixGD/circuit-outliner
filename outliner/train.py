@@ -4,7 +4,7 @@ import os
 from typing import Callable, List, Literal, Optional, TypeVar, overload
 
 import torch
-from tqdm import trange
+from tqdm import tqdm, trange
 
 import wandb
 from mixing_transformer import (
@@ -27,7 +27,9 @@ def lm_loss(logits, labels) -> torch.Tensor:
 
     They are offset, so labels[i, j] is the next token for predictions[i, j].
     """
-    return torch.nn.functional.cross_entropy(logits.flatten(0, 1), labels.flatten(), reduction="mean")
+    return torch.nn.functional.cross_entropy(
+        logits.flatten(0, 1), labels.flatten(), reduction="mean"
+    )
 
 
 def clasificaiton_loss(logits, labels, subset_toks: torch.Tensor) -> torch.Tensor:
@@ -104,9 +106,9 @@ class Experiment:
     def __init__(self, hparams, train=True) -> None:
         self.hparams = hparams
         self.base_model = get_base_model(hparams.base_model)
-        self.model = (DirectOutMixingTransformer if hparams.direct_out else IndirectMixingTransformer)(
-            self.base_model, hparams
-        )
+        self.model = (
+            DirectOutMixingTransformer if hparams.direct_out else IndirectMixingTransformer
+        )(self.base_model, hparams)
         self.dataset = get_owt_dataset()
         if train:
             self.train()
@@ -125,7 +127,9 @@ class Experiment:
 
         if self.hparams.classification_subset is not None:
             return clasificaiton_loss(
-                logits, labels, torch.tensor(self.hparams.classification_subset, device=logits.device)
+                logits,
+                labels,
+                torch.tensor(self.hparams.classification_subset, device=logits.device),
             )
         else:
             return lm_loss(logits, labels)
@@ -134,23 +138,31 @@ class Experiment:
     def log_wandb(snapshot, **kwargs):
         to_log = kwargs
         to_log["heads/p/mean"] = snapshot.heads[0].mean().item()
-        to_log["heads/q/mean"] = snapshot.heads[1].mean().item() if snapshot.heads.shape[0] > 1 else None
+        to_log["heads/q/mean"] = (
+            snapshot.heads[1].mean().item() if snapshot.heads.shape[0] > 1 else None
+        )
         wandb.log(to_log)
 
     def train(self):
         H = self.hparams
-        run = wandb.init(project="outliner", config=dataclasses.asdict(H), mode=None if H.wandb_enable else "disabled")
+        run = wandb.init(
+            project="outliner",
+            config=dataclasses.asdict(H),
+            mode=None if H.wandb_enable else "disabled",
+        )
         self.model.train()
         opt = torch.optim.Adam(self.model.mixer_parameters(), lr=H.lr)
         schedule = torch.optim.lr_scheduler.ExponentialLR(opt, H.lr_gamma)
         batch_iter = self.get_dataset_iter(H.batch_size, H.steps)
-        for step in trange(H.steps):
+        for step in trange(H.steps, leave=False):
             model_loss = self.get_loss(batch_iter)
             snap = self.model.parameter_snapshot()
 
             # the len(w) factor means that the total regularization penalty is twice as large if there's an adversary
             # this keeps protaganist behavior comparable with and without an adversary
-            get_reg_loss = lambda w: w.mean() * H.reg_coeff * len(w) if w is not None else torch.tensor(0)
+            get_reg_loss = (
+                lambda w: w.mean() * H.reg_coeff * len(w) if w is not None else torch.tensor(0)
+            )
             head_reg_loss, mlp_reg_loss, neuron_reg_loss = [
                 get_reg_loss(w) for w in (snap.heads, snap.mlps, snap.neurons)
             ]
@@ -193,7 +205,12 @@ class Experiment:
         batch_size = self.hparams.batch_size if batch_size is None else batch_size
         batch_iter = self.get_dataset_iter(batch_size, steps)
         with torch.no_grad():
-            losses = torch.tensor([self.get_loss(batch_iter).item() for _ in trange(steps, disable=not tqdm_enabled)])
+            losses = torch.tensor(
+                [
+                    self.get_loss(batch_iter).item()
+                    for _ in trange(steps, disable=not tqdm_enabled, leave=False)
+                ]
+            )
         return losses.mean().item()
 
 
@@ -209,7 +226,11 @@ def get_gpt_loss(steps=10, batch_size=4, classification_subset=None):
             logits, labels = out[:, :-1], toks[:, 1:]
 
             if classification_subset is not None:
-                loss = clasificaiton_loss(logits, labels, torch.tensor(classification_subset, device=logits.device))
+                loss = clasificaiton_loss(
+                    logits,
+                    labels,
+                    torch.tensor(classification_subset, device=logits.device),
+                )
             else:
                 loss = lm_loss(logits, labels)
             losses.append(loss.item())

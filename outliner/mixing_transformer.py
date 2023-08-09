@@ -5,8 +5,7 @@ from typing import Iterable, Optional, Tuple
 import einops
 import torch
 from torch import nn
-from transformer_lens import (ActivationCache, HookedTransformer,
-                              HookedTransformerConfig)
+from transformer_lens import ActivationCache, HookedTransformer, HookedTransformerConfig
 from transformer_lens.hook_points import HookPoint
 
 from mixer import LocType, Mixer, MixerHparams
@@ -29,6 +28,7 @@ class ParameterSnapshot:
         assert self.heads is not None and self.mlps is not None
         w = torch.cat((self.heads, self.mlps.unsqueeze(2)), dim=2).detach().cpu()
         return w[0] - w[1] if diff else w
+
 
 class MixingTransformer(nn.Module):
     def forward(self):
@@ -55,11 +55,15 @@ class IndirectMixingTransformer(MixingTransformer):
         self.mixers = {}  # will be in model order
         for l in range(self.cfg.n_layers):
             if self.hparams.mix_heads:
-                self.mixers[f"blocks.{l}.attn.hook_z"] = Mixer((self.cfg.n_heads, 1), "head", hparams=self.hparams)
+                self.mixers[f"blocks.{l}.attn.hook_z"] = Mixer(
+                    (self.cfg.n_heads, 1), "head", hparams=self.hparams
+                )
             if self.hparams.mix_neurons:
                 assert not self.hparams.mix_mlps
                 assert self.cfg.d_mlp is not None
-                self.mixers[f"blocks.{l}.mlp.hook_post"] = Mixer((self.cfg.d_mlp,), "neuron", hparams=self.hparams)
+                self.mixers[f"blocks.{l}.mlp.hook_post"] = Mixer(
+                    (self.cfg.d_mlp,), "neuron", hparams=self.hparams
+                )
             if self.hparams.mix_mlps:
                 assert not self.hparams.mix_neurons
                 self.mixers[f"blocks.{l}.hook_mlp_out"] = Mixer((1,), "mlp", hparams=self.hparams)
@@ -141,7 +145,9 @@ class DirectOutMixingTransformer(MixingTransformer):
 
     def _residual_diff_for_mlps(self, cache: ActivationCache, ref_idxs: torch.Tensor):
         # [batch, seqlen, layer, emb]
-        mlp_results = torch.stack([cache[f"blocks.{l}.hook_mlp_out"] for l in range(self.cfg.n_layers)], dim=2)
+        mlp_results = torch.stack(
+            [cache[f"blocks.{l}.hook_mlp_out"] for l in range(self.cfg.n_layers)], dim=2
+        )
         mixed_mlp_results = self.mixers["mlp"](mlp_results[ref_idxs], mlp_results[~ref_idxs])
         return mixed_mlp_results.sum(2) - mlp_results[ref_idxs].sum(2)
 
@@ -150,7 +156,9 @@ class DirectOutMixingTransformer(MixingTransformer):
         ref_idxs = torch.arange(len(ins)) < len(ref_in)
 
         _, cache = self.base_model.run_with_cache(ins, **kwargs)
-        pre_final_ln = cache[f"blocks.{self.cfg.n_layers-1}.hook_resid_post"][ref_idxs]  # [ref_batch, seqlen, emb]
+        pre_final_ln = cache[f"blocks.{self.cfg.n_layers-1}.hook_resid_post"][
+            ref_idxs
+        ]  # [ref_batch, seqlen, emb]
         if self.hparams.mix_heads:
             pre_final_ln += self._residual_diff_for_heads(cache, ref_idxs)
         if self.hparams.mix_mlps:

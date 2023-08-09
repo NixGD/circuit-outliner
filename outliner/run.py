@@ -3,19 +3,23 @@ import dataclasses
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 from tqdm import tqdm, trange
 from transformers import PreTrainedTokenizerBase
 
-from mixer import MixerHparams
 from mixing_transformer import (
-    DirectOutMixingTransformer,
     IndirectMixingTransformer,
     MixingTransformerHparams,
     ParameterSnapshot,
 )
-from train import Experiment, ExperimentInfo, TrainHparams, get_gpt_loss, get_maybe_cached, run_sweep
+from train import (
+    Experiment,
+    ExperimentInfo,
+    TrainHparams,
+    get_gpt_loss,
+    get_maybe_cached,
+    run_sweep,
+)
 from utils import DEVICE, get_base_model, get_owt_dataset, kl_div, next_toks
 
 # %% [markdown]
@@ -56,14 +60,18 @@ def test_basic_mixing():
         gpt_ref_out = gpt2(ref_toks)
         gpt_alt_out = gpt2(alt_toks)
 
-        mixer_p1 = IndirectMixingTransformer(gpt2, MixingTransformerHparams(init_p=1, mix_heads=True, mix_mlps=True))
+        mixer_p1 = IndirectMixingTransformer(
+            gpt2, MixingTransformerHparams(init_p=1, mix_heads=True, mix_mlps=True)
+        )
         mix_p1_out = mixer_p1(ref_toks, alt_toks)
         print(
             f"kl div between mix_p1 and ref_out: {kl_div(mix_p1_out, gpt_ref_out).item():.5f}",
         )
         assert torch.allclose(gpt_ref_out, mix_p1_out, atol=1e-3)
 
-        mixer_p0 = IndirectMixingTransformer(gpt2, MixingTransformerHparams(init_p=0, mix_heads=True, mix_mlps=True))
+        mixer_p0 = IndirectMixingTransformer(
+            gpt2, MixingTransformerHparams(init_p=0, mix_heads=True, mix_mlps=True)
+        )
         mix_p0_out = mixer_p0(ref_toks, alt_toks)
         print(f"kl div between mix_p1 and ref_out: {kl_div(mix_p0_out, gpt_alt_out).item():.5f}")
         assert kl_div(mix_p0_out, gpt_alt_out) < 0.01
@@ -77,18 +85,20 @@ We can also see how loss increases as we decrease p (and thus decrease the amoun
 """
 
 
-def loss_for_p(p: float, is_direct: bool, steps=4) -> float:
-    hparams = TrainHparams(init_p=p, mix_mlps=True, direct_out=is_direct, batch_size=4)
-    exp = Experiment(hparams)
+def loss_for_p(p: float, is_direct: bool, steps=4, **kwargs) -> float:
+    hparams = TrainHparams(
+        init_p=p, mix_mlps=True, direct_out=is_direct, batch_size=4, wandb_enable=False, **kwargs
+    )
+    exp = Experiment(hparams, train=False)
     return exp.val_loss(steps=steps, tqdm_enabled=False)
 
 
-def compute_losses_for_p():
+def compute_losses_for_p(**kwargs):
     ps = torch.linspace(0, 1, 20).tolist()
     print("Computing indirect losses:")
-    indirect_losses = [loss_for_p(p, is_direct=False) for p in tqdm(ps)]
+    indirect_losses = [loss_for_p(p, is_direct=False, **kwargs) for p in tqdm(ps)]
     print("Computing direct losses:")
-    direct_losses = [loss_for_p(p, is_direct=True) for p in tqdm(ps)]
+    direct_losses = [loss_for_p(p, is_direct=True, **kwargs) for p in tqdm(ps)]
     gpt_avg_loss = get_gpt_loss()
     return {
         "ps": ps,
@@ -158,7 +168,9 @@ def label_axes(axs):
 
 
 def get_matching_info(experiments: List[ExperimentInfo], **kwargs):
-    matches = [exp for exp in experiments if all(getattr(exp.hparams, k) == v for k, v in kwargs.items())]
+    matches = [
+        exp for exp in experiments if all(getattr(exp.hparams, k) == v for k, v in kwargs.items())
+    ]
     assert len(matches) == 1, f"Found {len(matches)} matches for {kwargs}"
     return matches[0]
 
@@ -236,7 +248,9 @@ print(f"Direct loss: {eos_direct_info.val_loss:.3f}")
 print(f"Indirect loss: {eos_indirect_info.val_loss:.3f}")
 
 fig, axs = plt.subplots(1, 2, sharey=True, figsize=(8, 4), squeeze=False)
-axs[0, 0].matshow(eos_indirect_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1)
+axs[0, 0].matshow(
+    eos_indirect_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1
+)
 axs[0, 1].matshow(eos_direct_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1)
 label_axes(axs)
 axs[0, 0].set_title("Indirect")
@@ -252,7 +266,9 @@ frontier_hyper_list = [dataclasses.replace(base_hypers, reg_coeff=c) for c in re
 frontier_indirect_infos = run_sweep("frontier_indirect", frontier_hyper_list)
 
 reg_coeffs = [0.5, 1, 2, 4, 8, 12, 14, 16, 20, 28]
-frontier_hyper_list = [dataclasses.replace(base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs]
+frontier_hyper_list = [
+    dataclasses.replace(base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs
+]
 frontier_direct_infos = run_sweep("frontier_direct", frontier_hyper_list)
 # %%
 
