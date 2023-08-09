@@ -250,16 +250,21 @@ def get_maybe_cached(name: str, fn: Callable):
         return result
 
 
-def run_sweep(name: str, hparam_list: List[TrainHparams]) -> List[ExperimentInfo]:
+def run_sweep(
+    name: str, hparam_list: List[TrainHparams], force_update=False
+) -> List[ExperimentInfo]:
     path = "../data/" + name + ".json"
-    if os.path.isfile(path):
+    if os.path.isfile(path) and not force_update:
         print(f"Getting cached experiment infos from {path}")
         with open(path, "r") as f:
             data = json.load(f)
             return [ExperimentInfo.from_json(d) for d in data]
     else:
-        print(f"No cache found. Running new sweep with {len(hparam_list)} experiments.")
-        infos = [Experiment(h, train=True).get_info() for h in hparam_list]
-        with open(path, "x") as f:
+        if force_update:
+            print(f"Forcing cache update. Running new sweep with {len(hparam_list)} experiments.")
+        else:
+            print(f"No cache found. Running new sweep with {len(hparam_list)} experiments.")
+        infos = [Experiment(h, train=True).get_info() for h in tqdm(hparam_list)]
+        with open(path, "w") as f:
             json.dump([info.to_json() for info in infos], f)
         return infos
