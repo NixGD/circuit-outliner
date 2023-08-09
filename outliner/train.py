@@ -40,7 +40,9 @@ def clasificaiton_loss(logits, labels, subset_toks: torch.Tensor) -> torch.Tenso
 
     This evaluates the logits as a classifier for if the next token is in the subset or not
     """
-    prob_within = logits.softmax(-1)[:, :, subset_toks].sum(-1)
+    # we clip as the numerics of .softmax are pretty bad (and we can't use logsoftmax)
+    epsilon = 1e-10
+    prob_within = logits.softmax(-1)[:, :, subset_toks].sum(-1).clip(epsilon, 1 - epsilon)
     is_within = torch.isin(labels, subset_toks).float()
     return torch.nn.functional.binary_cross_entropy(prob_within, is_within)
 

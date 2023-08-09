@@ -243,7 +243,8 @@ eos_base_hypers = dataclasses.replace(
 eos_hyper_list = [eos_base_hypers, dataclasses.replace(eos_base_hypers, direct_out=True)]
 eos_indirect_info, eos_direct_info = run_sweep("eos_experiment", eos_hyper_list)
 
-print(f"GPT's loss: {get_gpt_loss(classification_subset=eos_toks_ids):.3f}")
+eos_gpt_loss = get_gpt_loss(classification_subset=eos_toks_ids)
+print(f"GPT's loss: {eos_gpt_loss:.3f}")
 print(f"Direct loss: {eos_direct_info.val_loss:.3f}")
 print(f"Indirect loss: {eos_indirect_info.val_loss:.3f}")
 
@@ -278,7 +279,15 @@ def get_mean_p(snapshot: ParameterSnapshot) -> float:
 
 
 def frontier_plot(
-    flat_ps, flat_losses, flat_gpt_loss, frontier_infos: List[ExperimentInfo], ax: Optional[plt.Axes] = None
+    flat_ps,
+    flat_losses,
+    flat_gpt_loss,
+    frontier_infos: List[ExperimentInfo],
+    ax: Optional[plt.Axes] = None,
+    xlabel="Mean p",
+    ylabel="Loss",
+    title=None,
+    legend=False,
 ):
     ax = plt.gca() if ax is None else ax
     ax.plot(flat_ps, flat_losses, "-o", label="flat")
@@ -290,43 +299,83 @@ def frontier_plot(
     )
     ax.axhline(flat_gpt_loss, color="k", label="gpt2")
     ax.set_xlim(0, 1)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if legend:
+        ax.legend()
 
 
 fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
 
 flat_losses = get_maybe_cached("losses_for_p", compute_losses_for_p)
 frontier_plot(
-    flat_losses["ps"], flat_losses["indirect_losses"], flat_losses["gpt_avg_loss"], frontier_indirect_infos, ax=axs[0]
+    flat_losses["ps"],
+    flat_losses["indirect_losses"],
+    flat_losses["gpt_avg_loss"],
+    frontier_indirect_infos,
+    ax=axs[0],
+    title="Indirect",
 )
 
 frontier_plot(
-    flat_losses["ps"], flat_losses["direct_losses"], flat_losses["gpt_avg_loss"], frontier_direct_infos, ax=axs[1]
+    flat_losses["ps"],
+    flat_losses["direct_losses"],
+    flat_losses["gpt_avg_loss"],
+    frontier_direct_infos,
+    ax=axs[1],
+    ylabel=None,
+    title="Direct",
+    legend=True,
 )
-
-
-axs[0].set_xlabel("Mean p")
-axs[0].set_ylabel("Loss")
-axs[0].set_title("Indirect")
-
-axs[1].set_xlabel("Mean p")
-axs[1].set_title("Direct")
-
-axs[1].legend()
 
 plt.tight_layout()
 fig.savefig("frontiers.png")
 
+# %%
+reg_coeffs = [0.005, 0.05, 0.5]
+eos_frontier_hypers = [dataclasses.replace(eos_base_hypers, reg_coeff=c) for c in reg_coeffs]
+eos_frontier_indirect_infos = run_sweep(
+    "eos_frontier_indirect", eos_frontier_hypers, force_update=True
+)
+reg_coeffs = [0.005, 0.05, 0.5]
+eos_frontier_hypers = [
+    dataclasses.replace(eos_base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs
+]
+eos_frontier_direct_infos = run_sweep("eos_frontier_direct", eos_frontier_hypers, force_update=True)
 
-axs[1].plot(flat_losses["ps"], flat_losses["direct_losses"], "-o", label="flat")
-axs[1].axhline(flat_losses["gpt_avg_loss"], color="k", label="gpt2")
+# %%
 
-axs[1].plot(
-    [get_mean_p(info) for info in frontier_direct_infos], [info.val_loss for info in frontier_direct_infos], "-o", label="frontier"
+eos_flat_losses = get_maybe_cached(
+    "eos_losses_for_p", lambda: compute_losses_for_p(classification_subset=eos_toks_ids)
+)
+plt.plot(eos_flat_losses["ps"], eos_flat_losses["indirect_losses"], "-o", label="indirect")
+plt.plot(eos_flat_losses["ps"], eos_flat_losses["direct_losses"], "-o", label="direct")
+plt.axhline(eos_gpt_loss, color="k", label="gpt2")
+
+plt.ylabel("Loss")
+plt.xlabel("p")
+plt.gcf().set_size_inches(5, 5)
+plt.legend()
+# %%
+
+fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+
+frontier_plot(
+    eos_flat_losses["ps"], eos_flat_losses["indirect_losses"], eos_gpt_loss, eos_frontier_indirect_infos, ax=axs[0], title="Indirect"
+)
+frontier_plot(
+    eos_flat_losses["ps"],
+    eos_flat_losses["direct_losses"],
+    eos_gpt_loss,
+    eos_frontier_direct_infos,
+    ax=axs[1],
+    ylabel=None,
+    title="Direct",
+    legend=True,
 )
 
-plt.xlabel("Mean p")
-
-fig.savefig("direct_frontier.png")
 plt.tight_layout()
-fig.savefig("frontiers.png")
+fig.savefig("eos_frontiers.png")
+
 # %%
