@@ -333,16 +333,16 @@ plt.tight_layout()
 fig.savefig("frontiers.png")
 
 # %%
-reg_coeffs = [0.005, 0.05, 0.5]
+reg_coeffs = [0.002, 0.01, 0.05, 0.1, 0.2, 0.5, 1]
 eos_frontier_hypers = [dataclasses.replace(eos_base_hypers, reg_coeff=c) for c in reg_coeffs]
 eos_frontier_indirect_infos = run_sweep(
-    "eos_frontier_indirect", eos_frontier_hypers, force_update=True
+    "eos_frontier_indirect", eos_frontier_hypers
 )
-reg_coeffs = [0.005, 0.05, 0.5]
+reg_coeffs = [0.002, 0.005, 0.01, 0.02, 0.05, 0.5, 1]
 eos_frontier_hypers = [
     dataclasses.replace(eos_base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs
 ]
-eos_frontier_direct_infos = run_sweep("eos_frontier_direct", eos_frontier_hypers, force_update=True)
+eos_frontier_direct_infos = run_sweep("eos_frontier_direct", eos_frontier_hypers)
 
 # %%
 
