@@ -1,6 +1,6 @@
 # %%
 import dataclasses
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,11 +9,13 @@ from tqdm import tqdm, trange
 from transformers import PreTrainedTokenizerBase
 
 from mixer import MixerHparams
-from mixing_transformer import (DirectOutMixingTransformer,
-                                IndirectMixingTransformer,
-                                MixingTransformerHparams, ParameterSnapshot)
-from train import (Experiment, ExperimentInfo, TrainHparams, get_gpt_loss,
-                   get_maybe_cached, run_sweep)
+from mixing_transformer import (
+    DirectOutMixingTransformer,
+    IndirectMixingTransformer,
+    MixingTransformerHparams,
+    ParameterSnapshot,
+)
+from train import Experiment, ExperimentInfo, TrainHparams, get_gpt_loss, get_maybe_cached, run_sweep
 from utils import DEVICE, get_base_model, get_owt_dataset, kl_div, next_toks
 
 # %% [markdown]
@@ -240,6 +242,9 @@ label_axes(axs)
 axs[0, 0].set_title("Indirect")
 axs[0, 1].set_title("Direct")
 
+plt.tight_layout()
+fig.savefig("punctuation.png")
+
 # %%
 
 reg_coeffs = [0.5, 1, 2, 4, 8, 12, 13, 13.5, 14, 16, 20, 28]
@@ -251,19 +256,50 @@ frontier_hyper_list = [dataclasses.replace(base_hypers, reg_coeff=c, direct_out=
 frontier_direct_infos = run_sweep("frontier_direct", frontier_hyper_list)
 # %%
 
-flat_losses = get_maybe_cached("losses_for_p", compute_losses_for_p)
+
+def get_mean_p(snapshot: ParameterSnapshot) -> float:
+    return (snapshot.heads[0].mean().item() + snapshot.mlps[0].mean().item()) / 2
+
+
+def frontier_plot(
+    flat_ps, flat_losses, flat_gpt_loss, frontier_infos: List[ExperimentInfo], ax: Optional[plt.Axes] = None
+):
+    ax = plt.gca() if ax is None else ax
+    ax.plot(flat_ps, flat_losses, "-o", label="flat")
+    ax.plot(
+        [get_mean_p(info.snapshot) for info in frontier_infos],
+        [info.val_loss for info in frontier_infos],
+        "-o",
+        label="frontier",
+    )
+    ax.axhline(flat_gpt_loss, color="k", label="gpt2")
+    ax.set_xlim(0, 1)
+
 
 fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
-axs[0].plot(flat_losses["ps"], flat_losses["indirect_losses"], "-o", label="flat")
-axs[0].axhline(flat_losses["gpt_avg_loss"], color="k", label="gpt2")
 
-get_mean_p = lambda info: (info.snapshot.heads[0].mean().item() + info.snapshot.mlps[0].mean().item()) / 2
-axs[0].plot(
-    [get_mean_p(info) for info in frontier_indirect_infos], [info.val_loss for info in frontier_indirect_infos], "-o", label="frontier"
+flat_losses = get_maybe_cached("losses_for_p", compute_losses_for_p)
+frontier_plot(
+    flat_losses["ps"], flat_losses["indirect_losses"], flat_losses["gpt_avg_loss"], frontier_indirect_infos, ax=axs[0]
 )
+
+frontier_plot(
+    flat_losses["ps"], flat_losses["direct_losses"], flat_losses["gpt_avg_loss"], frontier_direct_infos, ax=axs[1]
+)
+
 
 axs[0].set_xlabel("Mean p")
 axs[0].set_ylabel("Loss")
+axs[0].set_title("Indirect")
+
+axs[1].set_xlabel("Mean p")
+axs[1].set_title("Direct")
+
+axs[1].legend()
+
+plt.tight_layout()
+fig.savefig("frontiers.png")
+
 
 axs[1].plot(flat_losses["ps"], flat_losses["direct_losses"], "-o", label="flat")
 axs[1].axhline(flat_losses["gpt_avg_loss"], color="k", label="gpt2")
