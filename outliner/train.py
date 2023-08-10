@@ -13,7 +13,7 @@ from mixing_transformer import (
     MixingTransformerHparams,
     ParameterSnapshot,
 )
-from utils import get_base_model, get_owt_dataset, next_toks
+from utils import get_base_model, get_dataset, next_toks
 
 LossFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
@@ -58,6 +58,8 @@ class TrainHparams(MixingTransformerHparams):
     reg_coeff: float = 1
     wandb_enable: bool = True
     classification_subset: Optional[List[int]] = None
+    dataset_name: str = "openwebtext"
+    dataset_subset: Optional[str] = None
 
 
 test_hypers = TrainHparams(steps=10, wandb_enable=False)
@@ -111,11 +113,15 @@ class Experiment:
         self.model = (
             DirectOutMixingTransformer if hparams.direct_out else IndirectMixingTransformer
         )(self.base_model, hparams)
-        self.dataset = get_owt_dataset()
+        self.dataset = get_dataset(hparams.dataset_name, hparams.dataset_subset, hparams.base_model)
         if train:
             self.train()
 
     def get_dataset_iter(self, batch_size, steps):
+        """
+        Get an iterator over the first part of the dataset, and skip self.dataset
+        forward to prevent dataset duplication
+        """
         total_data_points = batch_size * steps * 2
         batch_iter = self.dataset.take(total_data_points).iter(batch_size)
         self.dataset = self.dataset.skip(total_data_points)
@@ -219,7 +225,7 @@ class Experiment:
 def get_gpt_loss(steps=10, batch_size=4, classification_subset=None):
     """The loss of the base model on the same dataset and same loss function."""
     gpt = get_base_model()
-    batch_iter = get_owt_dataset().iter(batch_size)
+    batch_iter = get_dataset().iter(batch_size)
     losses = []
     with torch.no_grad():
         for _ in trange(steps):

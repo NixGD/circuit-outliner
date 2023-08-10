@@ -20,7 +20,7 @@ from train import (
     get_maybe_cached,
     run_sweep,
 )
-from utils import DEVICE, get_base_model, get_owt_dataset, kl_div, next_toks
+from utils import IMG_FOLDER, get_base_model, get_dataset, kl_div, next_toks
 
 # %% [markdown]
 
@@ -50,7 +50,7 @@ With p=0, our mixing transformer is just running on the alt input -- with the ex
 
 
 def test_basic_mixing():
-    dataset = get_owt_dataset()
+    dataset = get_dataset()
     batch_iter = dataset.iter(batch_size=2)
     ref_toks = next_toks(batch_iter)
     alt_toks = next_toks(batch_iter)
@@ -188,7 +188,7 @@ for i, is_direct in enumerate([True, False]):
 label_axes(axs)
 fig.suptitle("Importance of heads for direct paths (top) and all paths (bottom)", size="x-large")
 plt.tight_layout()
-plt.savefig("mixing_heads.png")
+plt.savefig(IMG_FOLDER + "mixing_heads.png")
 
 # %% [markdown]
 
@@ -223,7 +223,102 @@ axs[1, 1].matshow(adv_w[1], cmap="RdBu_r", vmin=-1, vmax=1)  # type: ignore
 label_axes(axs)
 
 plt.tight_layout()
-plt.savefig("adv vs no adv comparison.png")
+plt.savefig(IMG_FOLDER + "adv vs no adv comparison.png")
+
+# %% [markdown]
+"""
+How much information is needed to preserve good performance?
+
+We can get a sense of this by sweeping over the regularization coefficient. For larger regularization coefficients, the network will converge on a solution that preserves less information. We can plot this fronteir by measuring the validation loss compared to the mean p value (averaging across attention heads & mlp layers).
+
+We can compare this frontier to the "flat" frontier as seen above, where we initialize all weights in the network with a particular value of p but don't train them.
+"""
+
+# sweeping across regularization coefficients
+
+reg_coeffs = [0.5, 1, 2, 4, 8, 12, 13, 13.5, 14, 16, 20, 28]
+frontier_hyper_list = [dataclasses.replace(base_hypers, reg_coeff=c) for c in reg_coeffs]
+frontier_indirect_infos = run_sweep("frontier_indirect", frontier_hyper_list)
+
+reg_coeffs = [0.5, 1, 2, 4, 8, 12, 14, 16, 20, 28]
+frontier_hyper_list = [
+    dataclasses.replace(base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs
+]
+frontier_direct_infos = run_sweep("frontier_direct", frontier_hyper_list)
+# %%
+
+
+def get_mean_p(snapshot: ParameterSnapshot) -> float:
+    return (snapshot.heads[0].mean().item() + snapshot.mlps[0].mean().item()) / 2
+
+
+def frontier_plot(
+    flat_ps,
+    tens,
+    flat_gpt_loss,
+    frontier_infos: List[ExperimentInfo],
+    ax: Optional[plt.Axes] = None,
+    xlabel="Mean p",
+    ylabel="Loss",
+    title=None,
+    legend=False,
+    normalize=False,
+):
+    ax = plt.gca() if ax is None else ax
+    if normalize:
+        norm = lambda x: (x - flat_gpt_loss) / (tens[0] - flat_gpt_loss)
+    else:
+        norm = lambda x: x
+
+    ax.plot(flat_ps, norm(torch.tensor(tens)), "-o", label="flat")
+    ax.plot(
+        [get_mean_p(info.snapshot) for info in frontier_infos],
+        norm(torch.tensor([info.val_loss for info in frontier_infos])),
+        "-o",
+        label="frontier",
+    )
+    ax.axhline(norm(flat_gpt_loss), color="k", label="gpt2")
+    ax.set_xlim(0, 1)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if legend:
+        ax.legend()
+
+
+fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+
+flat_losses = get_maybe_cached("losses_for_p", compute_losses_for_p)
+frontier_plot(
+    flat_losses["ps"],
+    flat_losses["indirect_losses"],
+    flat_losses["gpt_avg_loss"],
+    frontier_indirect_infos,
+    ax=axs[0],
+    title="Indirect",
+)
+
+frontier_plot(
+    flat_losses["ps"],
+    flat_losses["direct_losses"],
+    flat_losses["gpt_avg_loss"],
+    frontier_direct_infos,
+    ax=axs[1],
+    ylabel=None,
+    title="Direct",
+    legend=True,
+)
+
+plt.tight_layout()
+fig.savefig("frontiers.png")
+
+# %% [markdown]
+"""
+What does this show?
+
+The more distributed the behavior, the more 
+
+"""
 
 # %% [markdown]
 
@@ -262,82 +357,10 @@ fig.savefig("punctuation.png")
 
 # %%
 
-reg_coeffs = [0.5, 1, 2, 4, 8, 12, 13, 13.5, 14, 16, 20, 28]
-frontier_hyper_list = [dataclasses.replace(base_hypers, reg_coeff=c) for c in reg_coeffs]
-frontier_indirect_infos = run_sweep("frontier_indirect", frontier_hyper_list)
-
-reg_coeffs = [0.5, 1, 2, 4, 8, 12, 14, 16, 20, 28]
-frontier_hyper_list = [
-    dataclasses.replace(base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs
-]
-frontier_direct_infos = run_sweep("frontier_direct", frontier_hyper_list)
-# %%
-
-
-def get_mean_p(snapshot: ParameterSnapshot) -> float:
-    return (snapshot.heads[0].mean().item() + snapshot.mlps[0].mean().item()) / 2
-
-
-def frontier_plot(
-    flat_ps,
-    flat_losses,
-    flat_gpt_loss,
-    frontier_infos: List[ExperimentInfo],
-    ax: Optional[plt.Axes] = None,
-    xlabel="Mean p",
-    ylabel="Loss",
-    title=None,
-    legend=False,
-):
-    ax = plt.gca() if ax is None else ax
-    ax.plot(flat_ps, flat_losses, "-o", label="flat")
-    ax.plot(
-        [get_mean_p(info.snapshot) for info in frontier_infos],
-        [info.val_loss for info in frontier_infos],
-        "-o",
-        label="frontier",
-    )
-    ax.axhline(flat_gpt_loss, color="k", label="gpt2")
-    ax.set_xlim(0, 1)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    if legend:
-        ax.legend()
-
-
-fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
-
-flat_losses = get_maybe_cached("losses_for_p", compute_losses_for_p)
-frontier_plot(
-    flat_losses["ps"],
-    flat_losses["indirect_losses"],
-    flat_losses["gpt_avg_loss"],
-    frontier_indirect_infos,
-    ax=axs[0],
-    title="Indirect",
-)
-
-frontier_plot(
-    flat_losses["ps"],
-    flat_losses["direct_losses"],
-    flat_losses["gpt_avg_loss"],
-    frontier_direct_infos,
-    ax=axs[1],
-    ylabel=None,
-    title="Direct",
-    legend=True,
-)
-
-plt.tight_layout()
-fig.savefig("frontiers.png")
-
 # %%
 reg_coeffs = [0.002, 0.01, 0.05, 0.1, 0.2, 0.5, 1]
 eos_frontier_hypers = [dataclasses.replace(eos_base_hypers, reg_coeff=c) for c in reg_coeffs]
-eos_frontier_indirect_infos = run_sweep(
-    "eos_frontier_indirect", eos_frontier_hypers
-)
+eos_frontier_indirect_infos = run_sweep("eos_frontier_indirect", eos_frontier_hypers)
 reg_coeffs = [0.002, 0.005, 0.01, 0.02, 0.05, 0.5, 1]
 eos_frontier_hypers = [
     dataclasses.replace(eos_base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs
@@ -362,7 +385,12 @@ plt.legend()
 fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
 
 frontier_plot(
-    eos_flat_losses["ps"], eos_flat_losses["indirect_losses"], eos_gpt_loss, eos_frontier_indirect_infos, ax=axs[0], title="Indirect"
+    eos_flat_losses["ps"],
+    eos_flat_losses["indirect_losses"],
+    eos_gpt_loss,
+    eos_frontier_indirect_infos,
+    ax=axs[0],
+    title="Indirect",
 )
 frontier_plot(
     eos_flat_losses["ps"],
@@ -379,3 +407,63 @@ plt.tight_layout()
 fig.savefig("eos_frontiers.png")
 
 # %%
+
+fig, axs = plt.subplots(2, 2, figsize=(6, 6), sharey="row", sharex=True)
+normalize = True
+frontier_plot(
+    flat_losses["ps"],
+    flat_losses["indirect_losses"],
+    flat_losses["gpt_avg_loss"],
+    frontier_indirect_infos,
+    ax=axs[0][0],
+    title="Indirect",
+    xlabel=None,
+    normalize=normalize,
+)
+
+frontier_plot(
+    flat_losses["ps"],
+    flat_losses["direct_losses"],
+    flat_losses["gpt_avg_loss"],
+    frontier_direct_infos,
+    ax=axs[0][1],
+    ylabel=None,
+    title="Direct",
+    legend=True,
+    xlabel=None,
+    normalize=normalize,
+)
+frontier_plot(
+    eos_flat_losses["ps"],
+    eos_flat_losses["indirect_losses"],
+    eos_gpt_loss,
+    eos_frontier_indirect_infos,
+    ax=axs[0][0],
+    normalize=normalize,
+)
+frontier_plot(
+    eos_flat_losses["ps"],
+    eos_flat_losses["direct_losses"],
+    eos_gpt_loss,
+    eos_frontier_direct_infos,
+    ax=axs[0][1],
+    ylabel=None,
+    normalize=normalize,
+)
+
+plt.tight_layout()
+fig.savefig(IMG_FOLDER + "eos_frontiers.png")
+# %%
+
+
+
+pythia_hparams = dataclasses.replace(base_hypers, base_model="pythia-70M")
+pythia_exp = Experiment(pythia_hparams)
+# %%
+pythia_info = pythia_exp.get_info()
+
+# %%
+
+
+pythia_hparams = dataclasses.replace(base_hypers, base_model="pythia-70M")
+pythia_exp = Experiment(pythia_hparams)
