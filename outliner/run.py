@@ -94,7 +94,7 @@ def loss_for_p(p: float, is_direct: bool, steps=4, **kwargs) -> float:
 
 
 def compute_losses_for_p(**kwargs):
-    ps = torch.linspace(0, 1, 20).tolist()
+    ps = torch.linspace(0, 1, 30).tolist()
     print("Computing indirect losses:")
     indirect_losses = [loss_for_p(p, is_direct=False, **kwargs) for p in tqdm(ps)]
     print("Computing direct losses:")
@@ -109,13 +109,14 @@ def compute_losses_for_p(**kwargs):
 
 
 losses = get_maybe_cached("losses_for_p", compute_losses_for_p)
-plt.plot(losses["ps"], losses["indirect_losses"], "-o", label="indirect")
-plt.plot(losses["ps"], losses["direct_losses"], "-o", label="indirect")
+plt.plot(losses["ps"], losses["indirect_losses"], label="indirect")
+plt.plot(losses["ps"], losses["direct_losses"], label="direct")
 plt.axhline(losses["gpt_avg_loss"], color="k", label="gpt2")
 
 plt.ylabel("Loss")
 plt.xlabel("p")
 plt.gcf().set_size_inches(5, 5)
+plt.xlim(0, 1)
 plt.legend()
 
 # %% [markdown]
@@ -254,8 +255,8 @@ def get_mean_p(snapshot: ParameterSnapshot) -> float:
 
 def frontier_plot(
     flat_ps,
-    tens,
-    flat_gpt_loss,
+    flat_losses,
+    flat_gpt_loss: Optional[float],
     frontier_infos: List[ExperimentInfo],
     ax: Optional[plt.Axes] = None,
     xlabel="Mean p",
@@ -263,21 +264,25 @@ def frontier_plot(
     title=None,
     legend=False,
     normalize=False,
+    color="black",
 ):
     ax = plt.gca() if ax is None else ax
     if normalize:
-        norm = lambda x: (x - flat_gpt_loss) / (tens[0] - flat_gpt_loss)
+        norm = lambda x: (x - flat_losses[-1]) / (flat_losses[0] - flat_losses[-1])
     else:
         norm = lambda x: x
 
-    ax.plot(flat_ps, norm(torch.tensor(tens)), "-o", label="flat")
+    ax.plot(flat_ps, norm(torch.tensor(flat_losses)), ls="dashed", label="flat", ms=5, color=color)
     ax.plot(
         [get_mean_p(info.snapshot) for info in frontier_infos],
         norm(torch.tensor([info.val_loss for info in frontier_infos])),
         "-o",
         label="frontier",
+        ms=5,
+        color=color,
     )
-    ax.axhline(norm(flat_gpt_loss), color="k", label="gpt2")
+    if flat_gpt_loss is not None:
+        ax.axhline(norm(flat_gpt_loss), color="k", label="gpt2")
     ax.set_xlim(0, 1)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -310,13 +315,13 @@ frontier_plot(
 )
 
 plt.tight_layout()
-fig.savefig(IMG_FOLDER + "frontiers.png")
+# fig.savefig(IMG_FOLDER + "frontiers.png")
 
 # %% [markdown]
 """
 What does this show?
 
-The more distributed the behavior, the more 
+The more distributed the behavior, the more down and to the left we'd expect the frontier to be.
 
 """
 
@@ -324,6 +329,8 @@ The more distributed the behavior, the more
 
 """
 # Testing on a specific classification subtask
+
+What if we narrow the scope of our investigation? In particular, we'll try to determine which parts of the model are resposible for determining if the current sentance is completed. We'll do this by interpreting the output of the model as if it were a classifier for a certain subset of tokens (any tokens that contain a period, exclamation point, or question mark).
 """
 
 tokenizer: PreTrainedTokenizerBase = get_base_model().tokenizer  # type: ignore
@@ -355,9 +362,14 @@ axs[0, 1].set_title("Direct")
 plt.tight_layout()
 fig.savefig(IMG_FOLDER + "punctuation.png")
 
-# %%
+# %% [markdown]
 
-# %%
+"""
+We can make a frontier plot once again.
+"""
+
+# training with different reg_coeffs
+
 reg_coeffs = [0.002, 0.01, 0.05, 0.1, 0.2, 0.5, 1]
 eos_frontier_hypers = [dataclasses.replace(eos_base_hypers, reg_coeff=c) for c in reg_coeffs]
 eos_frontier_indirect_infos = run_sweep("eos_frontier_indirect", eos_frontier_hypers)
@@ -367,22 +379,13 @@ eos_frontier_hypers = [
 ]
 eos_frontier_direct_infos = run_sweep("eos_frontier_direct", eos_frontier_hypers)
 
-# %%
+# flat losses
 
 eos_flat_losses = get_maybe_cached(
     "eos_losses_for_p", lambda: compute_losses_for_p(classification_subset=eos_toks_ids)
 )
-plt.plot(eos_flat_losses["ps"], eos_flat_losses["indirect_losses"], "-o", label="indirect")
-plt.plot(eos_flat_losses["ps"], eos_flat_losses["direct_losses"], "-o", label="direct")
-plt.axhline(eos_gpt_loss, color="k", label="gpt2")
 
-plt.ylabel("Loss")
-plt.xlabel("p")
-plt.gcf().set_size_inches(5, 5)
-plt.legend()
-# %%
-
-fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+fig, axs = plt.subplots(1, 2, sharey=True, figsize=(8, 4))
 
 frontier_plot(
     eos_flat_losses["ps"],
@@ -406,51 +409,61 @@ frontier_plot(
 plt.tight_layout()
 fig.savefig(IMG_FOLDER + "eos_frontiers.png")
 
-# %%
+# %% [markdown]
 
-fig, axs = plt.subplots(2, 2, figsize=(6, 6), sharey="row", sharex=True)
-normalize = True
+"""
+Comparing frontiers for both next-token-classificaiton and end of sentance classification. Note the y-axis is now normalized (by the loss difference between p=0 and p=1).
+"""
+
+fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey="row", sharex=True)
+# next tokens
 frontier_plot(
     flat_losses["ps"],
     flat_losses["indirect_losses"],
-    flat_losses["gpt_avg_loss"],
+    None,
     frontier_indirect_infos,
-    ax=axs[0][0],
-    title="Indirect",
+    ax=axs[0],
     xlabel=None,
-    normalize=normalize,
+    normalize=True,
+    color="cornflowerblue",
 )
 
 frontier_plot(
     flat_losses["ps"],
     flat_losses["direct_losses"],
-    flat_losses["gpt_avg_loss"],
+    None,
     frontier_direct_infos,
-    ax=axs[0][1],
+    ax=axs[1],
     ylabel=None,
-    title="Direct",
     legend=True,
     xlabel=None,
-    normalize=normalize,
+    normalize=True,
+    color="cornflowerblue",
 )
+# next tokens
 frontier_plot(
     eos_flat_losses["ps"],
     eos_flat_losses["indirect_losses"],
-    eos_gpt_loss,
+    None,
     eos_frontier_indirect_infos,
-    ax=axs[0][0],
-    normalize=normalize,
+    ax=axs[0],
+    title="Indirect",
+    normalize=True,
+    color="maroon",
 )
 frontier_plot(
     eos_flat_losses["ps"],
     eos_flat_losses["direct_losses"],
-    eos_gpt_loss,
+    None,
     eos_frontier_direct_infos,
-    ax=axs[0][1],
+    ax=axs[1],
+    title="Direct",
     ylabel=None,
-    normalize=normalize,
+    normalize=True,
+    color="maroon",
 )
 
 plt.tight_layout()
+axs[1].legend(["next token flat", "next token frontier", "eos flat", "eos frontier"])
 fig.savefig(IMG_FOLDER + "frontier_comparisons.png")
 # %%
