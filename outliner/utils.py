@@ -37,10 +37,9 @@ def get_dataset(
             truncation=True,
             max_length=1024,
             padding="max_length",
-            return_length=True,
         ).to(DEVICE)
         dataset_batch["toks"] = tok_out["input_ids"]
-        dataset_batch["seqlen"] = tok_out["length"]
+        dataset_batch["seqlen"] = (tok_out["input_ids"] != 50256).sum(-1) + 1 # includes start tok
         return dataset_batch
 
     dataset = dataset.map(lambda x: {"text": "<|endoftext|>" + x["text"]})

@@ -49,7 +49,7 @@ def clasificaiton_loss(logits, labels, subset_toks: torch.Tensor) -> torch.Tenso
 
 @dataclasses.dataclass(frozen=True)
 class TrainHparams(MixingTransformerHparams):
-    base_model: str = "gpt2-small"
+    base_model: str = "gpt2"
     batch_size: int = 4
     steps: int = 200
     lr: float = 0.1
