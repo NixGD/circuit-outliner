@@ -310,7 +310,7 @@ frontier_plot(
 )
 
 plt.tight_layout()
-fig.savefig("frontiers.png")
+fig.savefig(IMG_FOLDER + "frontiers.png")
 
 # %% [markdown]
 """
@@ -353,7 +353,7 @@ axs[0, 0].set_title("Indirect")
 axs[0, 1].set_title("Direct")
 
 plt.tight_layout()
-fig.savefig("punctuation.png")
+fig.savefig(IMG_FOLDER + "punctuation.png")
 
 # %%
 
@@ -404,7 +404,7 @@ frontier_plot(
 )
 
 plt.tight_layout()
-fig.savefig("eos_frontiers.png")
+fig.savefig(IMG_FOLDER + "eos_frontiers.png")
 
 # %%
 
@@ -452,18 +452,5 @@ frontier_plot(
 )
 
 plt.tight_layout()
-fig.savefig(IMG_FOLDER + "eos_frontiers.png")
+fig.savefig(IMG_FOLDER + "frontier_comparisons.png")
 # %%
-
-
-
-pythia_hparams = dataclasses.replace(base_hypers, base_model="pythia-70M")
-pythia_exp = Experiment(pythia_hparams)
-# %%
-pythia_info = pythia_exp.get_info()
-
-# %%
-
-
-pythia_hparams = dataclasses.replace(base_hypers, base_model="pythia-70M")
-pythia_exp = Experiment(pythia_hparams)
