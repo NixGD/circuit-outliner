@@ -413,6 +413,8 @@ fig.savefig(IMG_FOLDER + "eos_frontiers.png")
 
 """
 Comparing frontiers for both next-token-classificaiton and end of sentance classification. Note the y-axis is now normalized (by the loss difference between p=0 and p=1).
+
+The end-of-sentance frontier is consistantly lower -- one can recover the same performance while including less components. This is intuitive, since not every network component should be required to determine if the sentance is finished.
 """
 
 fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey="row", sharex=True)
@@ -463,6 +465,7 @@ frontier_plot(
     color="maroon",
 )
 
+plt.ylim(0,1)
 plt.tight_layout()
 axs[1].legend(["next token flat", "next token frontier", "eos flat", "eos frontier"])
 fig.savefig(IMG_FOLDER + "frontier_comparisons.png")
