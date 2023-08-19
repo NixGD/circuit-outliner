@@ -39,10 +39,11 @@ def get_dataset(
             padding="max_length",
         ).to(DEVICE)
         dataset_batch["toks"] = tok_out["input_ids"]
-        dataset_batch["seqlen"] = (tok_out["input_ids"] != 50256).sum(-1) + 1 # includes start tok
+        dataset_batch["seqlen"] = (tok_out["input_ids"] != tokenizer.pad_token_id).sum(-1) + 1  # includes start tok
         return dataset_batch
 
-    dataset = dataset.map(lambda x: {"text": "<|endoftext|>" + x["text"]})
+    col_name = "code" if dataset_name == "codeparrot/github-code" else "text"
+    dataset = dataset.map(lambda x: {"text": "<|endoftext|>" + x[col_name]})
     dataset = dataset.map(add_tok_columns, batched=True, batch_size=10)
     dataset = dataset.filter(lambda x: x["seqlen"] >= min_len)
     return dataset

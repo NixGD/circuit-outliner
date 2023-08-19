@@ -61,6 +61,9 @@ class TrainHparams(MixingTransformerHparams):
     dataset_name: str = "openwebtext"
     dataset_subset: Optional[str] = None
 
+    def evolve(self, **kwargs) -> "TrainHparams":
+        return dataclasses.replace(self, **kwargs)
+
 
 test_hypers = TrainHparams(steps=10, wandb_enable=False)
 
@@ -246,14 +249,14 @@ def get_gpt_loss(steps=10, batch_size=4, classification_subset=None):
     return torch.tensor(losses).mean().item()
 
 
-def get_maybe_cached(name: str, fn: Callable):
+def get_maybe_cached(name: str, fn: Callable, force_update=False):
     path = "../data/" + name + ".json"
-    if os.path.isfile(path):
+    if os.path.isfile(path) and not force_update:
         with open(path, "r") as f:
             return json.load(f)
     else:
         result = fn()
-        with open(path, "x") as f:
+        with open(path, "w") as f:
             json.dump(result, f)
         return result
 

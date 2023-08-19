@@ -1,17 +1,14 @@
 # %%
 import dataclasses
-from typing import Dict, List, Optional, Tuple
+from typing import List
 
 import matplotlib.pyplot as plt
 import torch
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
 
-from mixing_transformer import (
-    IndirectMixingTransformer,
-    MixingTransformerHparams,
-    ParameterSnapshot,
-)
+from mixing_transformer import IndirectMixingTransformer, MixingTransformerHparams
+from plotting import frontier_fig_facet_by_direct, frontier_plot, label_axes
 from train import (
     Experiment,
     ExperimentInfo,
@@ -85,21 +82,31 @@ We can also see how loss increases as we decrease p (and thus decrease the amoun
 """
 
 
-def loss_for_p(p: float, is_direct: bool, steps=4, **kwargs) -> float:
+def loss_for_p(p: float, is_direct: bool, steps=4, classification_subset=None) -> float:
     hparams = TrainHparams(
-        init_p=p, mix_mlps=True, direct_out=is_direct, batch_size=4, wandb_enable=False, **kwargs
+        init_p=p,
+        mix_mlps=True,
+        direct_out=is_direct,
+        batch_size=4,
+        wandb_enable=False,
+        classification_subset=classification_subset,
     )
     exp = Experiment(hparams, train=False)
     return exp.val_loss(steps=steps, tqdm_enabled=False)
 
 
-def compute_losses_for_p(**kwargs):
+def compute_losses_for_p(classification_subset=None):
     ps = torch.linspace(0, 1, 30).tolist()
     print("Computing indirect losses:")
-    indirect_losses = [loss_for_p(p, is_direct=False, **kwargs) for p in tqdm(ps)]
+    indirect_losses = [
+        loss_for_p(p, is_direct=False, classification_subset=classification_subset)
+        for p in tqdm(ps)
+    ]
     print("Computing direct losses:")
-    direct_losses = [loss_for_p(p, is_direct=True, **kwargs) for p in tqdm(ps)]
-    gpt_avg_loss = get_gpt_loss()
+    direct_losses = [
+        loss_for_p(p, is_direct=True, classification_subset=classification_subset) for p in tqdm(ps)
+    ]
+    gpt_avg_loss = get_gpt_loss(classification_subset=classification_subset)
     return {
         "ps": ps,
         "indirect_losses": indirect_losses,
@@ -155,17 +162,6 @@ hyper_list = [
 sweep_infos = run_sweep("importance_sweep", hyper_list)
 
 # %%
-
-
-def label_axes(axs):
-    for ax in axs[:, 0]:
-        ax.set_ylabel("layer")
-        ax.set_yticks(range(12))
-    for ax in axs[-1, :]:
-        ax.set_xlabel("head")
-        ax.set_xticks(range(13))
-        ax.set_xticklabels(list(range(12)) + ["M"])
-        ax.xaxis.set_ticks_position("bottom")
 
 
 def get_matching_info(experiments: List[ExperimentInfo], **kwargs):
@@ -246,75 +242,9 @@ frontier_hyper_list = [
     dataclasses.replace(base_hypers, reg_coeff=c, direct_out=True) for c in reg_coeffs
 ]
 frontier_direct_infos = run_sweep("frontier_direct", frontier_hyper_list)
-# %%
-
-
-def get_mean_p(snapshot: ParameterSnapshot) -> float:
-    return (snapshot.heads[0].mean().item() + snapshot.mlps[0].mean().item()) / 2
-
-
-def frontier_plot(
-    flat_ps,
-    flat_losses,
-    flat_gpt_loss: Optional[float],
-    frontier_infos: List[ExperimentInfo],
-    ax: Optional[plt.Axes] = None,
-    xlabel="Mean p",
-    ylabel="Loss",
-    title=None,
-    legend=False,
-    normalize=False,
-    color="black",
-):
-    ax = plt.gca() if ax is None else ax
-    if normalize:
-        norm = lambda x: (x - flat_losses[-1]) / (flat_losses[0] - flat_losses[-1])
-    else:
-        norm = lambda x: x
-
-    ax.plot(flat_ps, norm(torch.tensor(flat_losses)), ls="dashed", label="flat", ms=5, color=color)
-    ax.plot(
-        [get_mean_p(info.snapshot) for info in frontier_infos],
-        norm(torch.tensor([info.val_loss for info in frontier_infos])),
-        "-o",
-        label="frontier",
-        ms=5,
-        color=color,
-    )
-    if flat_gpt_loss is not None:
-        ax.axhline(norm(flat_gpt_loss), color="k", label="gpt2")
-    ax.set_xlim(0, 1)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    if legend:
-        ax.legend()
-
-
-fig, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
 
 flat_losses = get_maybe_cached("losses_for_p", compute_losses_for_p)
-frontier_plot(
-    flat_losses["ps"],
-    flat_losses["indirect_losses"],
-    flat_losses["gpt_avg_loss"],
-    frontier_indirect_infos,
-    ax=axs[0],
-    title="Indirect",
-)
-
-frontier_plot(
-    flat_losses["ps"],
-    flat_losses["direct_losses"],
-    flat_losses["gpt_avg_loss"],
-    frontier_direct_infos,
-    ax=axs[1],
-    ylabel=None,
-    title="Direct",
-    legend=True,
-)
-
-plt.tight_layout()
+fig = frontier_fig_facet_by_direct(flat_losses, frontier_indirect_infos, frontier_direct_infos)
 # fig.savefig(IMG_FOLDER + "frontiers.png")
 
 # %% [markdown]
@@ -385,28 +315,7 @@ eos_flat_losses = get_maybe_cached(
     "eos_losses_for_p", lambda: compute_losses_for_p(classification_subset=eos_toks_ids)
 )
 
-fig, axs = plt.subplots(1, 2, sharey=True, figsize=(8, 4))
-
-frontier_plot(
-    eos_flat_losses["ps"],
-    eos_flat_losses["indirect_losses"],
-    eos_gpt_loss,
-    eos_frontier_indirect_infos,
-    ax=axs[0],
-    title="Indirect",
-)
-frontier_plot(
-    eos_flat_losses["ps"],
-    eos_flat_losses["direct_losses"],
-    eos_gpt_loss,
-    eos_frontier_direct_infos,
-    ax=axs[1],
-    ylabel=None,
-    title="Direct",
-    legend=True,
-)
-
-plt.tight_layout()
+fig = frontier_fig_facet_by_direct(eos_flat_losses, eos_frontier_indirect_infos, eos_frontier_direct_infos)
 fig.savefig(IMG_FOLDER + "eos_frontiers.png")
 
 # %% [markdown]
@@ -465,7 +374,7 @@ frontier_plot(
     color="maroon",
 )
 
-plt.ylim(0,1)
+plt.ylim(0, 1)
 plt.tight_layout()
 axs[1].legend(["next token flat", "next token frontier", "eos flat", "eos frontier"])
 fig.savefig(IMG_FOLDER + "frontier_comparisons.png")
