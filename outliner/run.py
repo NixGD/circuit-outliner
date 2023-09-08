@@ -171,6 +171,25 @@ def get_matching_info(experiments: List[ExperimentInfo], **kwargs):
     assert len(matches) == 1, f"Found {len(matches)} matches for {kwargs}"
     return matches[0]
 
+# %%
+fig, axs = plt.subplots(1, 2, sharey=True, figsize=(8, 4), squeeze=False)
+direct_info = get_matching_info(sweep_infos, direct_out = True, reg_coeff=1)
+indirect_info = get_matching_info(sweep_infos, direct_out = False, reg_coeff=1)
+
+axs[0, 0].matshow(
+    indirect_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1
+)
+axs[0, 1].matshow(direct_info.snapshot.heads_and_mlps(diff=True), cmap="RdBu", vmin=-1, vmax=1)
+label_axes(axs)
+axs[0, 0].set_title("Indirect")
+axs[0, 1].set_title("Direct")
+
+plt.tight_layout()
+fig.savefig(IMG_FOLDER + "base_lm_fig.png")
+
+
+# %%
+
 
 fig, axs = plt.subplots(2, 3, figsize=(8, 6), sharex=True, sharey=True)
 for i, is_direct in enumerate([True, False]):
@@ -183,7 +202,7 @@ for i, is_direct in enumerate([True, False]):
             ax.set_title(f"reg_coeff={reg_coeff}", pad=10)
 
 label_axes(axs)
-fig.suptitle("Importance of heads for direct paths (top) and all paths (bottom)", size="x-large")
+fig.suptitle("Importance for direct paths (top) and all paths (bottom)", size="x-large")
 plt.tight_layout()
 plt.savefig(IMG_FOLDER + "mixing_heads.png")
 
@@ -337,6 +356,7 @@ frontier_plot(
     xlabel=None,
     normalize=True,
     color="cornflowerblue",
+    ylabel="Normalized loss"
 )
 
 frontier_plot(
@@ -361,6 +381,7 @@ frontier_plot(
     title="Indirect",
     normalize=True,
     color="maroon",
+    ylabel="Normalized loss",
 )
 frontier_plot(
     eos_flat_losses["ps"],
