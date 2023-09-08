@@ -9,6 +9,8 @@ import torch
 from train import Experiment, ExperimentInfo, TrainHparams, run_sweep
 from utils import IMG_FOLDER
 
+from plotting import label_axes
+
 # %%
 hparams = TrainHparams(
     base_model="EleutherAI/pythia-160M-deduped",
@@ -47,16 +49,20 @@ def facet_2d(row_key: str, row_values: List, col_key: str, col_values: List):
 
             if row_idx == 0:
                 ax.set_title(col_val[19:], pad=10)
+            
+    label_axes(axs)
 
     return fig
     
 
 fig = facet_2d("direct_out", [True,], "dataset_name", datasets)
-# %%
-# fig.suptitle("Importance of heads for direct paths (top) and all paths (bottom)", size="x-large")
-# plt.tight_layout()
-# plt.savefig(IMG_FOLDER + "mixing_heads.png")
+fig.set_size_inches(12,3.3)
 
+fig.suptitle("Pythia importance by dataset", size="x-large")
+plt.tight_layout()
+plt.savefig(IMG_FOLDER + "pythia-dataset.png")
+
+# %%
 
 # # %%
 # pythia_info = pythia_exp.get_info()
